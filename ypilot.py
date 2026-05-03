@@ -19,9 +19,13 @@ Controls:
     Shift + Up/W       thrust forward at 5x normal (boost - escape velocity)
     Ctrl  + Up/W       thrust forward at 10% normal (precision)
     Down  / S          retro-thrust at 10% of forward power
-    H                  toggle brake assist (autopilot tries to zero velocity)
-    Shift (while H on) trim autopilot thrust +5% (slow rise)
-    Ctrl  (while H on) trim autopilot thrust -5% (slow drop)
+    H                  toggle brake assist (autopilot matches velocity of
+                       nearest landable body, or zeroes absolute velocity
+                       if no landable body in scene)
+    Shift (while H on) hover-hold: zero only radial velocity, leave
+                       tangential drift alone (lines you up over a pad)
+    Ctrl  (while H on) damp autopilot to 0.25x strength (fine soft landings)
+    Shift+Ctrl (H on)  hover-hold at 0.25x strength
     B (hold)           build mode while landed near an unoccupied build pad
     + / =              zoom in
     - / _              zoom out
@@ -105,10 +109,10 @@ BRAKE_RING_COLOR = (90, 200, 255)
 # --- Trajectory prediction --------------------------------------------------
 PREDICT_SECONDS = 30.0           # default look-ahead
 PREDICT_MIN_SECONDS = 5.0        # `/` key floor
-PREDICT_MAX_SECONDS = 300.0      # `*` key ceiling (5 minutes)
+PREDICT_MAX_SECONDS = 1000.0     # `*` key ceiling (~16.7 minutes)
 PREDICT_STEP = 1.5               # multiplicative step per `/` or `*` press
 PREDICT_DT_MIN = 1.0 / 60.0      # smallest sim step (used for short windows)
-PREDICT_TARGET_STEPS = 1800      # cap total steps so 5min predictions stay cheap
+PREDICT_TARGET_STEPS = 6400      # cap total steps so 5min predictions stay cheap
 PREDICT_DRAW_STRIDE = 6
 PREDICT_COLOR = (90, 200, 255)
 PREDICT_IMPACT_COLOR = (255, 90, 90)
@@ -184,12 +188,12 @@ class Camera:
         self.pos = Vector2(0.0, 0.0)
         self.zoom = 1.0
 
-    def world_to_screen(self, p: Vector2):
+    def world_to_screen(self, p: Vector2) -> tuple[float, float]:
         """Return (x, y) screen-space tuple for a world-space point."""
         return ((p.x - self.pos.x) * self.zoom + WIDTH * 0.5,
                 (p.y - self.pos.y) * self.zoom + HEIGHT * 0.5)
 
-    def world_to_screen_int(self, p: Vector2):
+    def world_to_screen_int(self, p: Vector2) -> tuple[int, int]:
         sx, sy = self.world_to_screen(p)
         return (int(sx), int(sy))
 
@@ -232,7 +236,7 @@ class Body:
             tangent = Vector2(-radial.y, radial.x)
             self.pos = self.parent.pos + radial * self.orbit_radius
             self.vel = self.parent.vel + tangent * (self.omega * self.orbit_radius)
-
+    
     def position_at(self, t: float) -> Vector2:
         if self.parent is None:
             return Vector2(0.0, 0.0)
@@ -242,7 +246,7 @@ class Body:
         ) * self.orbit_radius
 
 
-def make_solar_system() -> list:
+def make_solar_system() -> list[Body]:
     sun = Body(
         "Sun", radius=SUN_RADIUS, mu=SUN_MU,
         color=SUN_COLOR, rim=SUN_RIM,
@@ -257,7 +261,7 @@ def make_solar_system() -> list:
     return [sun, planet]
 
 
-def update_bodies(bodies: list, t: float) -> None:
+def update_bodies(bodies: list[Body], t: float) -> None:
     for b in bodies:
         b.update_at(t)
 
@@ -270,7 +274,7 @@ def circular_orbit_speed(body: Body, radius: float) -> float:
     return math.sqrt(body.mu / radius)
 
 
-def gravity_at(pos: Vector2, bodies: list) -> Vector2:
+def gravity_at(pos: Vector2, bodies: list[Body]) -> Vector2:
     total = Vector2(0.0, 0.0)
     for body in bodies:
         to_body = body.pos - pos
@@ -281,7 +285,7 @@ def gravity_at(pos: Vector2, bodies: list) -> Vector2:
     return total
 
 
-def gravity_at_t(pos: Vector2, t: float, bodies: list) -> Vector2:
+def gravity_at_t(pos: Vector2, t: float, bodies: list[Body]) -> Vector2:
     total = Vector2(0.0, 0.0)
     for body in bodies:
         bp = body.position_at(t)
@@ -295,6 +299,24 @@ def gravity_at_t(pos: Vector2, t: float, bodies: list) -> Vector2:
 
 def shortest_angle_diff(target: float, current: float) -> float:
     return (target - current + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def nearest_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
+    """Closest landable body to `pos`, or None if there isn't one in scene.
+
+    Used by the brake-assist autopilot so it matches velocity to whatever
+    you're actually flying toward (the sun is not a viable landing target).
+    """
+    best = None
+    best_d2 = float("inf")
+    for b in bodies:
+        if not b.landable:
+            continue
+        d2 = (b.pos - pos).length_squared()
+        if d2 < best_d2:
+            best_d2 = d2
+            best = b
+    return best
 
 
 # ============================================================================
@@ -365,7 +387,7 @@ class Enemy:
             ENEMY_COURSE_CORRECT_MEAN * (1.0 + ENEMY_COURSE_CORRECT_RAND),
         )
 
-    def update(self, dt: float, bodies: list, ship_pos=None) -> None:
+    def update(self, dt: float, bodies: list[Body], ship_pos: Vector2 | None = None) -> None:
         self.pos += self.vel * dt
 
         if ship_pos is not None:
@@ -406,7 +428,7 @@ class Turret:
             math.cos(self.mount_angle), math.sin(self.mount_angle)
         ) * (self.body.radius + 2.0)
 
-    def update(self, dt: float, enemies: list, bullets: list) -> None:
+    def update(self, dt: float, enemies: list[Enemy], bullets: list[Bullet]) -> None:
         if not self.alive:
             return
 
@@ -450,7 +472,7 @@ class Turret:
         else:
             self.fire_cooldown = max(0.0, self.fire_cooldown - dt)
 
-    def _fire(self, bullets: list) -> None:
+    def _fire(self, bullets: list[Bullet]) -> None:
         muzzle_dir = Vector2(math.cos(self.angle), math.sin(self.angle))
         muzzle_pos = self.pos + muzzle_dir * TURRET_BARREL_LEN
         bullets.append(Bullet(muzzle_pos, muzzle_dir * BULLET_SPEED))
@@ -465,7 +487,7 @@ def generate_deposits(body: Body, n: int = NUM_DEPOSITS) -> list:
     return out
 
 
-def generate_buildpads(body: Body, n: int = NUM_BUILDPADS) -> list:
+def generate_buildpads(body: Body, n: int = NUM_BUILDPADS) -> list[BuildPad]:
     out = []
     for i in range(n):
         base = (i / n) * (2.0 * math.pi) + math.pi / n
@@ -481,7 +503,7 @@ def generate_buildpads(body: Body, n: int = NUM_BUILDPADS) -> list:
 class Ship:
     def __init__(self, planet: Body):
         self.reset(planet)
-
+    
     def reset(self, planet: Body) -> None:
         start_r = planet.radius + 280.0
         v_rel = circular_orbit_speed(planet, start_r)
@@ -493,6 +515,7 @@ class Ship:
         self.thrust_scale = 1.0
         self.brake_assist = False
         self.brake_assist_scale = 1.0
+        self.hover_hold = False
         self.fuel = MAX_FUEL
         self.ore = 0.0
         self.mining_target = None
@@ -500,13 +523,13 @@ class Ship:
         self.landed_body = None
         self.landed_radial = 0.0
         self.alive = True
-
+    
     def toggle_brake_assist(self) -> None:
         if self.alive and not self.landed and self.fuel > 0.0:
             self.brake_assist = not self.brake_assist
-
-    def update(self, dt: float, keys, mods: int, deposits: list,
-               bodies: list, mouse_pos=None,
+    
+    def update(self, dt: float, keys, mods: int, deposits: list[Deposit],
+               bodies: list[Body], mouse_pos: tuple[int, int] | None = None,
                mouse_aim_active: bool = True) -> None:
         if not self.alive:
             return
@@ -562,10 +585,8 @@ class Ship:
         if self.retro_thrusting:
             burn += RETRO_THRUST_SCALE * dt
         if self.brake_assist:
-            desired = (-BRAKE_KP * self.vel - gravity_at(self.pos, bodies)) \
-                * self.brake_assist_scale
-            mag = min(desired.length(), BRAKE_MAX_ACCEL)
-            burn += (mag / SHIP_THRUST) * dt
+            desired = self._brake_assist_accel(self.pos, self.vel, bodies)
+            burn += (desired.length() / SHIP_THRUST) * dt
         self.fuel = max(0.0, self.fuel - burn)
 
         a0 = self._compute_accel(self.pos, self.vel, bodies)
@@ -576,7 +597,7 @@ class Ship:
 
         self._check_body_contact(bodies)
 
-    def _check_body_contact(self, bodies: list) -> None:
+    def _check_body_contact(self, bodies: list[Body]) -> None:
         for body in bodies:
             to_body = self.pos - body.pos
             r = to_body.length()
@@ -587,7 +608,7 @@ class Ship:
                     self.alive = False
                 return
 
-    def _mine(self, deposits: list, dt: float) -> None:
+    def _mine(self, deposits: list[Deposit], dt: float) -> None:
         best = None
         best_d2 = MINING_RANGE * MINING_RANGE
         for dep in deposits:
@@ -642,17 +663,14 @@ class Ship:
             self.retro_thrusting = True
 
         if self.brake_assist and not (forward_pressed or reverse_pressed):
-            if mods & pygame.KMOD_SHIFT:
-                self.brake_assist_scale = 1.05
-            elif mods & pygame.KMOD_CTRL:
-                self.brake_assist_scale = 0.95
-            else:
-                self.brake_assist_scale = 1.0
+            self.hover_hold = bool(mods & pygame.KMOD_SHIFT)
+            self.brake_assist_scale = 0.25 if (mods & pygame.KMOD_CTRL) else 1.0
         else:
+            self.hover_hold = False
             self.brake_assist_scale = 1.0
 
     def _compute_accel(self, pos: Vector2, vel: Vector2,
-                       bodies: list) -> Vector2:
+                       bodies: list[Body]) -> Vector2:
         accel = Vector2(0.0, 0.0)
         forward_dir = Vector2(math.cos(self.angle), math.sin(self.angle))
 
@@ -661,20 +679,54 @@ class Ship:
         if self.retro_thrusting:
             accel -= forward_dir * (SHIP_THRUST * RETRO_THRUST_SCALE)
 
-        if self.brake_assist:
-            desired = (-BRAKE_KP * vel - gravity_at(pos, bodies)) \
-                * self.brake_assist_scale
-            mag = desired.length()
-            if mag > BRAKE_MAX_ACCEL:
-                desired *= (BRAKE_MAX_ACCEL / mag)
-            accel += desired
-
+        accel += self._brake_assist_accel(pos, vel, bodies)
         accel += gravity_at(pos, bodies)
         return accel
 
-    def predict_trajectory(self, bodies: list, t_start: float,
+    def _brake_assist_accel(self, pos: Vector2, vel: Vector2,
+                            bodies: list[Body]) -> Vector2:
+        """Desired brake-assist thrust acceleration (clamped at BRAKE_MAX_ACCEL).
+
+        Default mode: drag relative velocity toward the nearest landable
+        body's velocity, so a "stop" really means "match the planet" --
+        landings on a moving body converge naturally instead of needing
+        manual under-correction.
+
+        Hover-hold (Shift): kill only the radial component of relative
+        velocity, leaving tangential drift untouched. Altitude locks while
+        you slide sideways -- handy for lining up over a build pad.
+
+        Falls back to zeroing absolute velocity if no landable body exists
+        (e.g. you've drifted into deep space far from the system).
+        """
+        if not self.brake_assist:
+            return Vector2(0.0, 0.0)
+
+        target = nearest_landable(pos, bodies)
+        if target is not None:
+            rel_vel = vel - target.vel
+            if self.hover_hold:
+                up = pos - target.pos
+                if up.length_squared() > 1e-6:
+                    up = up.normalize()
+                    vel_to_kill = up * rel_vel.dot(up)
+                else:
+                    vel_to_kill = rel_vel
+            else:
+                vel_to_kill = rel_vel
+        else:
+            vel_to_kill = vel
+
+        desired = (-BRAKE_KP * vel_to_kill - gravity_at(pos, bodies)) \
+            * self.brake_assist_scale
+        mag = desired.length()
+        if mag > BRAKE_MAX_ACCEL:
+            desired *= (BRAKE_MAX_ACCEL / mag)
+        return desired
+
+    def predict_trajectory(self, bodies: list[Body], t_start: float,
                            seconds: float = PREDICT_SECONDS,
-                           dt: float = None):
+                           dt: float | None = None) -> tuple[list[Vector2], float | None]:
         # Scale dt with prediction length so cost stays bounded. For short
         # windows we use the sim's native dt; for very long windows we step
         # in larger jumps (sacrificing precision for predictive reach -- the
@@ -712,7 +764,7 @@ class Ship:
                 break
         return points, impact_speed
 
-    def draw(self, surf, camera: Camera) -> None:
+    def draw(self, surf: pygame.Surface, camera: Camera) -> None:
         if not self.alive:
             return
 
@@ -784,7 +836,7 @@ class Starfield:
                 random.randint(120, 230),
             ])
 
-    def draw(self, surf, camera: Camera) -> None:
+    def draw(self, surf: pygame.Surface, camera: Camera) -> None:
         cx, cy = camera.pos.x, camera.pos.y
         for sx, sy, depth, bright in self.stars:
             x = (sx - cx * depth) % WIDTH
@@ -796,7 +848,7 @@ class Starfield:
 # Drawing helpers
 # ============================================================================
 
-def draw_body(surf, camera: Camera, body: Body) -> None:
+def draw_body(surf: pygame.Surface, camera: Camera, body: Body) -> None:
     sx, sy = camera.world_to_screen(body.pos)
     r_screen = camera.scale(body.radius)
     margin = r_screen + 200
@@ -819,7 +871,7 @@ def draw_body(surf, camera: Camera, body: Body) -> None:
                        max(1, int(camera.scale(2))))
 
 
-def draw_orbit_path(surf, camera: Camera, body: Body, segments: int = 96) -> None:
+def draw_orbit_path(surf: pygame.Surface, camera: Camera, body: Body, segments: int = 96) -> None:
     if body.parent is None or body.orbit_radius <= 0.0:
         return
     parent_pos = body.parent.pos
@@ -834,7 +886,7 @@ def draw_orbit_path(surf, camera: Camera, body: Body, segments: int = 96) -> Non
         pygame.draw.line(surf, (50, 60, 90), a, b, 1)
 
 
-def draw_deposit(surf, camera: Camera, dep: Deposit) -> None:
+def draw_deposit(surf: pygame.Surface, camera: Camera, dep: Deposit) -> None:
     body = dep.body
     radial = Vector2(math.cos(dep.angle), math.sin(dep.angle))
     tangent = Vector2(-radial.y, radial.x)
@@ -869,7 +921,7 @@ def draw_deposit(surf, camera: Camera, dep: Deposit) -> None:
             )
 
 
-def draw_buildpad(surf, camera: Camera, pad: BuildPad) -> None:
+def draw_buildpad(surf: pygame.Surface, camera: Camera, pad: BuildPad) -> None:
     body = pad.body
     radial = Vector2(math.cos(pad.angle), math.sin(pad.angle))
     tangent = Vector2(-radial.y, radial.x)
@@ -890,7 +942,7 @@ def draw_buildpad(surf, camera: Camera, pad: BuildPad) -> None:
     pygame.draw.polygon(surf, rim, pts, 1)
 
 
-def draw_turret(surf, camera: Camera, t: Turret) -> None:
+def draw_turret(surf: pygame.Surface, camera: Camera, t: Turret) -> None:
     if not t.alive:
         return
     sx, sy = camera.world_to_screen(t.pos)
@@ -905,20 +957,20 @@ def draw_turret(surf, camera: Camera, t: Turret) -> None:
                      max(1, int(camera.scale(3))))
 
 
-def draw_bullet(surf, camera: Camera, b: Bullet) -> None:
+def draw_bullet(surf: pygame.Surface, camera: Camera, b: Bullet) -> None:
     sx, sy = camera.world_to_screen(b.pos)
     pygame.draw.circle(surf, BULLET_COLOR, (int(sx), int(sy)),
                        max(1, int(camera.scale(BULLET_RADIUS))))
 
 
-def draw_enemy(surf, camera: Camera, e: Enemy) -> None:
+def draw_enemy(surf: pygame.Surface, camera: Camera, e: Enemy) -> None:
     sx, sy = camera.world_to_screen(e.pos)
     r = max(1, int(camera.scale(ENEMY_RADIUS)))
     pygame.draw.circle(surf, ENEMY_COLOR, (int(sx), int(sy)), r)
     pygame.draw.circle(surf, ENEMY_RIM, (int(sx), int(sy)), r, 1)
 
 
-def draw_trajectory(surf, camera: Camera, points, impact_speed) -> None:
+def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2], impact_speed: float | None) -> None:
     if len(points) < 2:
         return
     n = len(points)
@@ -943,7 +995,7 @@ def draw_trajectory(surf, camera: Camera, points, impact_speed) -> None:
         pygame.draw.circle(surf, color, ip, 2)
 
 
-def draw_mining_beam(surf, camera: Camera, ship_pos: Vector2, target: Deposit) -> None:
+def draw_mining_beam(surf: pygame.Surface, camera: Camera, ship_pos: Vector2, target: Deposit) -> None:
     sp = camera.world_to_screen_int(ship_pos)
     dp = camera.world_to_screen_int(target.pos)
     pygame.draw.line(surf, MINING_BEAM_COLOR, sp, dp, max(1, int(camera.scale(2))))
@@ -951,7 +1003,7 @@ def draw_mining_beam(surf, camera: Camera, ship_pos: Vector2, target: Deposit) -
 
 # --- HUD always renders at native screen size; not affected by zoom ---------
 
-def draw_fuel_bar(surf, x: int, y: int, w: int, h: int,
+def draw_fuel_bar(surf: pygame.Surface, x: int, y: int, w: int, h: int,
                   fuel: float, max_fuel: float) -> None:
     frac = max(0.0, min(1.0, fuel / max_fuel)) if max_fuel > 0 else 0.0
     if frac > LOW_FUEL_FRAC:
@@ -966,8 +1018,8 @@ def draw_fuel_bar(surf, x: int, y: int, w: int, h: int,
         pygame.draw.rect(surf, fill_color, (x + 1, y + 1, fill_w, h - 2))
 
 
-def draw_hud(surf, font, ship: Ship, planet: Body, sun: Body,
-             enemies: list, turrets: list, build_prompt: bool,
+def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: Body, sun: Body,
+             enemies: list[Enemy], turrets: list[Turret], build_prompt: bool,
              zoom: float, predict_seconds: float) -> None:
     if ship.alive:
         r_planet = (ship.pos - planet.pos).length()
@@ -1002,13 +1054,15 @@ def draw_hud(surf, font, ship: Ship, planet: Body, sun: Body,
         if ship.retro_thrusting:
             lines.append("Retro:       on (10%)")
         if ship.brake_assist:
-            if ship.brake_assist_scale > 1.0:
-                trim = "  trim +5% (Shift)"
-            elif ship.brake_assist_scale < 1.0:
-                trim = "  trim -5% (Ctrl)"
-            else:
-                trim = ""
-            lines.append(f"BRAKE ASSIST: on  (cancels on W/S){trim}")
+            target = nearest_landable(ship.pos, [sun, planet])
+            mode = f"matching {target.name}" if target is not None else "zeroing velocity"
+            extras = []
+            if ship.hover_hold:
+                extras.append("HOVER (Shift)")
+            if ship.brake_assist_scale < 1.0:
+                extras.append(f"damp x{ship.brake_assist_scale:g} (Ctrl)")
+            extra_str = "  " + "  ".join(extras) if extras else ""
+            lines.append(f"BRAKE ASSIST: on  ({mode}){extra_str}  (cancels on W/S)")
         if ship.landed:
             if ship.mining_target is not None:
                 lines.append(f"LANDED  -  refueling + MINING ({MINING_RATE:.0f}/s)")
@@ -1037,7 +1091,7 @@ def draw_hud(surf, font, ship: Ship, planet: Body, sun: Body,
         draw_fuel_bar(surf, 16, bar_y, 220, 10, ship.fuel, MAX_FUEL)
 
 
-def draw_build_menu(surf, font, ship: Ship) -> tuple:
+def draw_build_menu(surf: pygame.Surface, font: pygame.font.Font, ship: Ship) -> tuple[tuple[int, int, int, int], bool]:
     panel_x = (WIDTH - BUILD_PANEL_W) // 2
     panel_y = (HEIGHT - BUILD_PANEL_H) // 2
     pygame.draw.rect(surf, BUILD_PANEL_BG,
@@ -1075,7 +1129,7 @@ def draw_build_menu(surf, font, ship: Ship) -> tuple:
 # Main loop
 # ============================================================================
 
-def nearest_unoccupied_pad(ship: Ship, pads: list):
+def nearest_unoccupied_pad(ship: Ship, pads: list[BuildPad]) -> BuildPad | None:
     if not ship.alive or not ship.landed:
         return None
     best = None
@@ -1090,7 +1144,7 @@ def nearest_unoccupied_pad(ship: Ship, pads: list):
     return best
 
 
-def build_world():
+def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad], list[Turret], list[Bullet], list[Enemy]]:
     bodies = make_solar_system()
     sun = bodies[0]
     planet = bodies[1]

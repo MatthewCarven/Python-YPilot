@@ -21,7 +21,7 @@ See the docstring at the top of `ypilot.py` for the full list. Briefly:
 - **Mouse** aims the ship's nose
 - **W / Shift+W / Ctrl+W** thrust forward (nominal / 5x boost / 10% precision)
 - **S** retro-thrust at 10% of forward
-- **H** toggles brake-assist autopilot; **Shift / Ctrl** while it's on trim it ±5%
+- **H** toggles brake-assist autopilot. By default it matches the velocity of the nearest landable body, so a "stop" really means "match the planet" — landings on a moving body just work. **Shift** while H is on = hover-hold (zero only radial velocity, drift tangentially — useful for lining up over a build pad). **Ctrl** while H is on = damp to 0.25x strength (fine soft landings; stacks with Shift).
 - **B (hold)** opens the build menu when landed near an unoccupied build pad
 - **+ / -** zoom in/out; **0** resets zoom
 - **/ *** shorten/lengthen the trajectory prediction window
@@ -58,8 +58,14 @@ Single-file Python, ~1290 lines. Key design choices:
   speed. The trajectory predictor's impact-color marker also uses relative
   speed.
 - Fuel consumption scales with thrust magnitude. 5x boost burns 5x as fast.
-- Brake-assist thrust trim (Shift/Ctrl while H is on) is ±5% — gentle
-  altitude control during a hover, fine-grain by design.
+- Brake-assist matches the velocity of the nearest landable body rather
+  than zeroing absolute world velocity. This is the difference between
+  "stop" (which means "drift away from a moving planet") and "match"
+  (which means "settle onto it"). Two modifiers while H is on:
+  **Shift** = hover-hold, kills only the radial component of relative
+  velocity so altitude locks while tangential drift continues — useful
+  for setting up an approach over a build pad. **Ctrl** = 0.25x scale,
+  fine soft landings; stacks cleanly with hover-hold.
 
 ## Educational forks (planned)
 
