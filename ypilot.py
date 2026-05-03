@@ -22,6 +22,8 @@ Controls:
     Shift + Up/W       thrust forward at 5x normal (boost - escape velocity)
     Ctrl  + Up/W       thrust forward at 10% normal (precision)
     Down  / S          retro-thrust at 10% of forward power
+    Q                  strafe left at 10% of forward power
+    E                  strafe right at 10% of forward power
     H                  toggle brake assist (autopilot matches velocity of
                        nearest landable body, or zeroes absolute velocity
                        if no landable body in scene)
@@ -90,6 +92,8 @@ LANDED_RING_COLOR = (140, 220, 140)
 THRUST_BOOST_SCALE = 5.0
 THRUST_PRECISION_SCALE = 0.1
 RETRO_THRUST_SCALE = 0.1
+LATERAL_THRUST_SCALE = 0.1       # Q / E strafe thrusters; same magnitude
+                                 # as retro for symmetric feel
 
 MOUSE_AIM_DEADZONE_SQ = 9.0
 
@@ -103,7 +107,7 @@ CRITICAL_FUEL_FRAC = 0.05
 LAND_SPEED_MAX = 35.0
 LAND_ANGLE_TOLERANCE = math.radians(30)
 LAND_ALIGN_DOT = math.cos(LAND_ANGLE_TOLERANCE)
-TAKEOFF_LOCK_SECONDS = 0.75      # mouse aim / turn keys are suppressed for
+TAKEOFF_LOCK_SECONDS = 0.30      # mouse aim / turn keys are suppressed for
                                  # this long after liftoff so the ship commits
                                  # to a clean vertical climb before steering
                                  # control returns to the player
@@ -526,6 +530,8 @@ class Ship:
         self.angle = -math.pi / 2
         self.thrusting = False
         self.retro_thrusting = False
+        self.strafing_left = False
+        self.strafing_right = False
         self.thrust_scale = 1.0
         self.brake_assist = False
         self.brake_assist_scale = 1.0
@@ -586,6 +592,8 @@ class Ship:
         if self.takeoff_lock_timer > 0.0:
             self.thrusting = True
             self.retro_thrusting = False
+            self.strafing_left = False
+            self.strafing_right = False
             self.thrust_scale = THRUST_BOOST_SCALE
             self.brake_assist = False
 
@@ -630,6 +638,10 @@ class Ship:
             burn += self.thrust_scale * dt
         if self.retro_thrusting:
             burn += RETRO_THRUST_SCALE * dt
+        if self.strafing_left:
+            burn += LATERAL_THRUST_SCALE * dt
+        if self.strafing_right:
+            burn += LATERAL_THRUST_SCALE * dt
         if self.brake_assist:
             desired = self._brake_assist_accel(self.pos, self.vel, bodies)
             burn += (desired.length() / SHIP_THRUST) * dt
@@ -690,9 +702,13 @@ class Ship:
     def _read_thrust_input(self, keys, mods: int) -> None:
         forward_pressed = bool(keys[pygame.K_UP] or keys[pygame.K_w])
         reverse_pressed = bool(keys[pygame.K_DOWN] or keys[pygame.K_s])
+        strafe_left_pressed = bool(keys[pygame.K_q])
+        strafe_right_pressed = bool(keys[pygame.K_e])
 
         self.thrusting = False
         self.retro_thrusting = False
+        self.strafing_left = False
+        self.strafing_right = False
 
         if forward_pressed:
             self.brake_assist = False
@@ -708,7 +724,20 @@ class Ship:
             self.brake_assist = False
             self.retro_thrusting = True
 
-        if self.brake_assist and not (forward_pressed or reverse_pressed):
+        # Strafe does NOT cancel brake-assist. Forward and retro are
+        # "I'm taking control" gestures, but strafe is "nudge the position
+        # autopilot is holding". Combining strafe + hover-hold over a
+        # build pad is the main reason this distinction exists.
+        if strafe_left_pressed:
+            self.strafing_left = True
+        if strafe_right_pressed:
+            self.strafing_right = True
+
+        # Trim modifiers (Shift hover-hold, Ctrl damp) only apply when
+        # forward thrust isn't pressed -- Shift/Ctrl are also forward-
+        # thrust scale modifiers, so we'd have a conflict otherwise.
+        # Strafe and retro don't use Shift/Ctrl, so they don't conflict.
+        if self.brake_assist and not forward_pressed:
             self.hover_hold = bool(mods & pygame.KMOD_SHIFT)
             self.brake_assist_scale = 0.25 if (mods & pygame.KMOD_CTRL) else 1.0
         else:
@@ -724,6 +753,16 @@ class Ship:
             accel += forward_dir * (SHIP_THRUST * self.thrust_scale)
         if self.retro_thrusting:
             accel -= forward_dir * (SHIP_THRUST * RETRO_THRUST_SCALE)
+
+        # Lateral strafe thrusters: perpendicular to the nose. In pygame
+        # screen coords (+y down), -90 deg rotation of forward gives
+        # the pilot's left direction.
+        if self.strafing_left or self.strafing_right:
+            pilot_left_dir = Vector2(math.sin(self.angle), -math.cos(self.angle))
+            if self.strafing_left:
+                accel += pilot_left_dir * (SHIP_THRUST * LATERAL_THRUST_SCALE)
+            if self.strafing_right:
+                accel -= pilot_left_dir * (SHIP_THRUST * LATERAL_THRUST_SCALE)
 
         accel += self._brake_assist_accel(pos, vel, bodies)
         accel += gravity_at(pos, bodies)
@@ -857,6 +896,25 @@ class Ship:
             flicker = SHIP_LEN * z * (0.3 + random.random() * 0.2)
             tip = base + fwd * flicker
             side = Vector2(-fwd.y, fwd.x) * (SHIP_LEN * 0.18 * z)
+            pygame.draw.polygon(surf, RETRO_FLAME_COLOR, [tip, base + side, base - side])
+
+        # Strafe puffs: exhaust comes from the OPPOSITE side of the ship
+        # from the direction of force, since reaction thrust shoots mass
+        # the way you don't want to go.
+        fwd = Vector2(math.cos(self.angle), math.sin(self.angle))
+        if self.strafing_left:
+            pilot_right = Vector2(-math.sin(self.angle), math.cos(self.angle))
+            base = Vector2(cx, cy) + pilot_right * (SHIP_LEN * 0.4 * z)
+            flicker = SHIP_LEN * z * (0.2 + random.random() * 0.15)
+            tip = base + pilot_right * flicker
+            side = fwd * (SHIP_LEN * 0.12 * z)
+            pygame.draw.polygon(surf, RETRO_FLAME_COLOR, [tip, base + side, base - side])
+        if self.strafing_right:
+            pilot_left = Vector2(math.sin(self.angle), -math.cos(self.angle))
+            base = Vector2(cx, cy) + pilot_left * (SHIP_LEN * 0.4 * z)
+            flicker = SHIP_LEN * z * (0.2 + random.random() * 0.15)
+            tip = base + pilot_left * flicker
+            side = fwd * (SHIP_LEN * 0.12 * z)
             pygame.draw.polygon(surf, RETRO_FLAME_COLOR, [tip, base + side, base - side])
 
 
