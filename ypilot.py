@@ -37,7 +37,9 @@ Controls:
     0                  reset zoom to 1.0
     /                  shorter trajectory prediction window (down to 5s)
     *                  longer trajectory prediction window (up to 5min)
+    F10                toggle enemy spawns (also clears any in scene)
     F11                toggle fullscreen
+    F12                save screenshot (PNG) next to ypilot.py
     R                  reset world
     Esc                quit
 
@@ -46,7 +48,9 @@ Run:
     python ypilot.py
 """
 
+import datetime
 import math
+import os
 import random
 import sys
 
@@ -1124,7 +1128,8 @@ def draw_fuel_bar(surf: pygame.Surface, x: int, y: int, w: int, h: int,
 
 def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: Body, sun: Body,
              enemies: list[Enemy], turrets: list[Turret], build_prompt: bool,
-             zoom: float, predict_seconds: float) -> None:
+             zoom: float, predict_seconds: float,
+             kills: int, enemies_enabled: bool) -> None:
     if ship.alive:
         r_planet = (ship.pos - planet.pos).length()
         altitude = max(0.0, r_planet - planet.radius)
@@ -1150,7 +1155,8 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: B
             f"Sun dist:    {d_sun:7.0f}",
             f"Fuel:        {ship.fuel:6.2f} / {MAX_FUEL:.0f}",
             f"Ore:         {ship.ore:6.1f}",
-            f"Turrets:     {live_turrets}    Enemies: {live_enemies}",
+            f"Turrets:     {live_turrets}    Enemies: {live_enemies}{'' if enemies_enabled else ' (off)'}",
+            f"Kills:       {kills}",
             f"Zoom:        x{zoom:.2f}    Predict: {predict_seconds:.0f}s",
         ]
         if thrust_label:
@@ -1278,6 +1284,8 @@ def main() -> None:
     ship = Ship(planet)
     stars = Starfield()
     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
+    enemies_enabled = True
+    kills = 0
 
     camera = Camera()
     camera.zoom = 1.0
@@ -1303,6 +1311,13 @@ def main() -> None:
                     bodies, planet, sun, deposits, pads, turrets, bullets, enemies = build_world()
                     ship.reset(planet)
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
+                    kills = 0
+                elif event.key == pygame.K_F10:
+                    enemies_enabled = not enemies_enabled
+                    if not enemies_enabled:
+                        for e in enemies:
+                            e.alive = False
+                        enemies = []
                 elif event.key == pygame.K_h:
                     ship.toggle_brake_assist()
                 elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
@@ -1328,6 +1343,10 @@ def main() -> None:
                     new_w, new_h = screen.get_size()
                     if (new_w, new_h) != (WIDTH, HEIGHT):
                         WIDTH, HEIGHT = new_w, new_h
+                elif event.key == pygame.K_F12:
+                    stamp = datetime.datetime.now().strftime("%Y-%m-%d - %H-%M-%S")
+                    out_dir = os.path.dirname(os.path.abspath(__file__))
+                    pygame.image.save(screen, os.path.join(out_dir, f"{stamp}.png"))
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_clicked = True
 
@@ -1346,10 +1365,11 @@ def main() -> None:
             ship.update(dt, keys, mods, deposits, bodies,
                         mouse_pos=mouse_pos, mouse_aim_active=mouse_aim_active)
 
-            enemy_spawn_timer -= dt
-            if enemy_spawn_timer <= 0.0:
-                enemies.append(spawn_enemy(planet))
-                enemy_spawn_timer = ENEMY_SPAWN_INTERVAL
+            if enemies_enabled:
+                enemy_spawn_timer -= dt
+                if enemy_spawn_timer <= 0.0:
+                    enemies.append(spawn_enemy(planet))
+                    enemy_spawn_timer = ENEMY_SPAWN_INTERVAL
 
             ship_pos = ship.pos if ship.alive else None
             for e in enemies:
@@ -1376,6 +1396,7 @@ def main() -> None:
                         e.alive = False
                         b.alive = False
                         ship.ore += ENEMY_KILL_REWARD
+                        kills += 1
                         break
 
             enemies = [e for e in enemies if e.alive]
@@ -1419,7 +1440,8 @@ def main() -> None:
 
         build_prompt = (candidate_pad is not None) and not build_held
         draw_hud(screen, font, ship, planet, sun, enemies, turrets,
-                 build_prompt, camera.zoom, predict_seconds)
+                 build_prompt, camera.zoom, predict_seconds,
+                 kills, enemies_enabled)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)
