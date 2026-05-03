@@ -10,6 +10,7 @@ pads, and defend against UFOs that drift in from off-screen.
 pip install pygame-ce
 python ypilot.py
 ```
+<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/b26fe13c-2f4b-4020-ae4b-a164926014ae" />
 
 Tested on Python 3.14 / pygame-ce 2.5+. Window auto-sizes to your desktop
 resolution.
