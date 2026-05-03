@@ -147,7 +147,7 @@ MINING_RATE = 20.0
 MINING_BEAM_COLOR = (240, 220, 110)
 
 # --- Build pads + construction ----------------------------------------------
-NUM_BUILDPADS = 3
+NUM_BUILDPADS = 5
 BUILDPAD_VISUAL = 12.0
 BUILDPAD_RANGE = 50.0
 BUILDPAD_COLOR = (110, 130, 170)
