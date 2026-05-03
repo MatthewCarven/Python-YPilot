@@ -12,7 +12,10 @@ off-screen.
 Window auto-sizes to the user's desktop resolution. Zoom in/out with +/-.
 
 Controls:
-    Mouse              aims the ship's nose at the cursor (primary aim)
+    Mouse              aims the ship's nose at the cursor (primary aim;
+                       suppressed for ~0.75s after liftoff -- the ship
+                       fires full boost vertically during this window
+                       regardless of input, then steering returns to you)
     Left  / A          rotate counter-clockwise (keyboard fallback)
     Right / D          rotate clockwise        (keyboard fallback)
     Up    / W          thrust forward
@@ -100,6 +103,17 @@ CRITICAL_FUEL_FRAC = 0.05
 LAND_SPEED_MAX = 35.0
 LAND_ANGLE_TOLERANCE = math.radians(30)
 LAND_ALIGN_DOT = math.cos(LAND_ANGLE_TOLERANCE)
+TAKEOFF_LOCK_SECONDS = 0.75      # mouse aim / turn keys are suppressed for
+                                 # this long after liftoff so the ship commits
+                                 # to a clean vertical climb before steering
+                                 # control returns to the player
+LAUNCH_PAD_HEIGHT = 5.0          # extra clearance above the surface at the
+                                 # moment of liftoff. The body is frozen
+                                 # during ship.update, so the ship's first
+                                 # leapfrog step drifts ~body.vel*dt toward
+                                 # the body's static position (worst case
+                                 # ~1.67 px at the planet's orbital speed).
+                                 # 5 px gives us comfortable headroom.
 
 # --- Brake assist -----------------------------------------------------------
 BRAKE_KP = 2.0
@@ -516,6 +530,7 @@ class Ship:
         self.brake_assist = False
         self.brake_assist_scale = 1.0
         self.hover_hold = False
+        self.takeoff_lock_timer = 0.0
         self.fuel = MAX_FUEL
         self.ore = 0.0
         self.mining_target = None
@@ -534,7 +549,14 @@ class Ship:
         if not self.alive:
             return
 
-        if mouse_aim_active and mouse_pos is not None:
+        # Tick down the post-liftoff steering lock. While > 0, mouse aim and
+        # turn keys are suppressed so a fresh boost climbs cleanly upward
+        # instead of being yanked sideways into the surface by an off-centre
+        # cursor.
+        self.takeoff_lock_timer = max(0.0, self.takeoff_lock_timer - dt)
+        steering_active = self.takeoff_lock_timer <= 0.0
+
+        if steering_active and mouse_aim_active and mouse_pos is not None:
             dx = mouse_pos[0] - WIDTH / 2
             dy = mouse_pos[1] - HEIGHT / 2
             if dx * dx + dy * dy >= MOUSE_AIM_DEADZONE_SQ:
@@ -548,12 +570,24 @@ class Ship:
                 else:
                     self.angle = target
 
-        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            self.angle -= SHIP_TURN_RATE * dt
-        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            self.angle += SHIP_TURN_RATE * dt
+        if steering_active:
+            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                self.angle -= SHIP_TURN_RATE * dt
+            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                self.angle += SHIP_TURN_RATE * dt
 
         self._read_thrust_input(keys, mods)
+
+        # Launch assist: while the takeoff lock is active, force full boost
+        # forward regardless of what the player is (or isn't) holding. One
+        # press commits to the climb; the ship handles the rest until it's
+        # clear of the surface. Cancels retro and brake-assist for the same
+        # window so nothing else fights the launch.
+        if self.takeoff_lock_timer > 0.0:
+            self.thrusting = True
+            self.retro_thrusting = False
+            self.thrust_scale = THRUST_BOOST_SCALE
+            self.brake_assist = False
 
         if self.landed and self.landed_body is not None:
             self.brake_assist = False
@@ -568,9 +602,17 @@ class Ship:
             self.angle = self.landed_radial
 
             if self.thrusting or self.retro_thrusting:
+                # Lift ship to launch-pad height before unlatching so the
+                # first frame's tangential drift (ship inherits body.vel
+                # while body is frozen during ship.update) can't carry the
+                # ship back into the body's static position. Without this,
+                # trailing-side launches re-land every frame until orbital
+                # geometry shifts enough to break the loop.
+                self.pos = body.pos + radial * (body.radius + LAUNCH_PAD_HEIGHT)
                 self.landed = False
                 self.landed_body = None
                 self.mining_target = None
+                self.takeoff_lock_timer = TAKEOFF_LOCK_SECONDS
             else:
                 self.fuel = min(MAX_FUEL, self.fuel + REFUEL_RATE * dt)
                 self._mine(deposits, dt)
