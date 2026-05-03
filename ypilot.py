@@ -562,6 +562,10 @@ class Ship:
                              math.sin(self.landed_radial))
             self.pos = body.pos + radial * (body.radius + 1.0)
             self.vel = Vector2(body.vel)
+            # Nose locked to surface-radial while parked, so mouse drift
+            # can't tilt the ship before liftoff. Mouse aim resumes the
+            # frame after thrust unlatches us from the surface.
+            self.angle = self.landed_radial
 
             if self.thrusting or self.retro_thrusting:
                 self.landed = False
