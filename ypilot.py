@@ -47,7 +47,9 @@ Controls:
                        delta-v of (SHIP_THRUST * duration) in that direction.
                        Bodies, ship, enemies, fuel all freeze while paused.
     [ / ]              (paused only) shorten / lengthen the planned burn
-                       duration in 0.1s steps; current value shown on HUD
+                       duration in 0.1s steps; current value shown on HUD.
+                       Duration is signed -- step past 0 into negatives to
+                       plan a retro burn without flipping the mouse 180°.
     Ctrl + [ / ]       (paused only) duration step at 0.01s (precision)
     Ctrl+Shift + [ / ] (paused only) duration step at 0.001s (extra-fine)
     Alt + [ / ]        (paused only) duration step at 0.0001s (super-fine)
@@ -89,8 +91,8 @@ PHYSICS_DT = 1.0 / FPS
 MAX_FRAME_DT = 0.25
 
 # --- Zoom -------------------------------------------------------------------
-ZOOM_MIN = 0.25
-ZOOM_MAX = 4.0
+ZOOM_MIN = 0.125
+ZOOM_MAX = 8.0
 ZOOM_STEP = 1.15
 
 # --- Sun --------------------------------------------------------------------
@@ -172,7 +174,7 @@ PREDICT_SECONDS = 30.0           # default look-ahead
 PREDICT_MIN_SECONDS = 5.0        # `/` key floor
 PREDICT_MAX_SECONDS = 1000.0     # `*` key ceiling (~16.7 minutes)
 PREDICT_STEP = 1.5               # multiplicative step per `/` or `*` press
-PREDICT_TARGET_STEPS = 6400      # cap total steps so 5min predictions stay cheap
+PREDICT_TARGET_STEPS = 12800      # cap total steps so 5min predictions stay cheap
 PREDICT_DRAW_STRIDE = 6
 PREDICT_COLOR = (90, 200, 255)
 PREDICT_IMPACT_COLOR = (255, 90, 90)
@@ -185,11 +187,12 @@ PREDICT_IMPACT_COLOR = (255, 90, 90)
 # in the aimed direction. Approximation: real burns happen over time, but for
 # short burns (< a few seconds) the impulse model is within a hair of reality
 # and keeps the math one-line.
+# Duration is signed: stepping below 0 flips the impulse vector, equivalent
+# to pointing the cursor 180° opposite. Lets you A/B forward vs. retro burns
+# from the same aim point (with [ / ] alone) instead of spinning the mouse.
 PLAN_BURN_DURATION_DEFAULT = 1.0
-PLAN_BURN_DURATION_MIN = 0.0001        # lowered to match the super-fine step;
-                                       # 0.1ms*220 = 0.022 px/s nudge is the
-                                       # tightest orbital trim available
 PLAN_BURN_DURATION_MAX = 10.0
+PLAN_BURN_DURATION_MIN = -PLAN_BURN_DURATION_MAX  # symmetric: negative = retro
 PLAN_BURN_DURATION_STEP = 0.1               # plain [ / ]
 PLAN_BURN_DURATION_PRECISION_STEP = 0.01    # Ctrl + [ / ]
 PLAN_BURN_DURATION_FINE_STEP = 0.001        # Ctrl+Shift + [ / ]
@@ -902,8 +905,13 @@ class Ship:
         """Apply an instantaneous delta-v of (SHIP_THRUST * duration) along
         burn_dir, matching what the plan-mode predictor showed.
 
+        duration is signed: a negative value flips the impulse vector and the
+        post-burn nose direction, equivalent to aiming the cursor 180°
+        opposite. Fuel cost is abs(duration) -- a retro burn costs fuel like
+        any other burn.
+
         Returns False if the ship is dead or out of fuel. If fuel is short
-        of `duration`, delivers a proportionally smaller impulse so the
+        of |duration|, delivers a proportionally smaller impulse so the
         burn never costs fuel the ship doesn't have. Unlatches cleanly
         from the surface if landed, bypassing takeoff_lock_timer -- the
         player has already chosen the burn direction, the launch-assist
@@ -913,8 +921,9 @@ class Ship:
         if self.fuel <= 0.0:
             return False
 
-        effective_duration = min(duration, self.fuel)
-        dv_mag = SHIP_THRUST * effective_duration
+        fuel_cost = min(abs(duration), self.fuel)
+        sign = 1.0 if duration >= 0.0 else -1.0
+        dv_mag = SHIP_THRUST * fuel_cost * sign
 
         if self.landed and self.landed_body is not None:
             body = self.landed_body
@@ -930,8 +939,9 @@ class Ship:
             self.takeoff_lock_timer = 0.0  # no lock: player owns direction
 
         self.vel = self.vel + burn_dir * dv_mag
-        self.angle = math.atan2(burn_dir.y, burn_dir.x)
-        self.fuel = max(0.0, self.fuel - effective_duration)
+        # Face the actual impulse direction (flips for negative durations).
+        self.angle = math.atan2(burn_dir.y * sign, burn_dir.x * sign)
+        self.fuel = max(0.0, self.fuel - fuel_cost)
         return True
 
     def predict_trajectory(self, bodies: list[Body], t_start: float,
@@ -1726,9 +1736,12 @@ def main() -> None:
             # when landed it sits at launch-pad height, not on the surface).
             arrow_origin = plan_pos0 if plan_pos0 is not None else ship.pos
             sx, sy = camera.world_to_screen_int(arrow_origin)
-            arrow_len = min(80, 12 + plan_burn_duration * 14)
-            ex = int(sx + math.cos(plan_burn_angle) * arrow_len)
-            ey = int(sy + math.sin(plan_burn_angle) * arrow_len)
+            # Arrow flips for negative durations so it shows the actual
+            # impulse direction, matching the orange trajectory.
+            arrow_sign = 1.0 if plan_burn_duration >= 0.0 else -1.0
+            arrow_len = min(80, 12 + abs(plan_burn_duration) * 14)
+            ex = int(sx + math.cos(plan_burn_angle) * arrow_len * arrow_sign)
+            ey = int(sy + math.sin(plan_burn_angle) * arrow_len * arrow_sign)
             pygame.draw.line(screen, PLAN_COLOR, (sx, sy), (ex, ey), 2)
 
         for body in bodies:
