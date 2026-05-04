@@ -14,6 +14,7 @@ pip install pygame-ce
 python ypilot.py
 ```
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/b26fe13c-2f4b-4020-ae4b-a164926014ae" />
+<img width="1920" height="1080" alt="2026-05-04 - 21-14-45" src="https://github.com/user-attachments/assets/a024ba52-82ad-4d8f-a4f5-ec9c5a78a706" />
 
 Tested on Python 3.14 / pygame-ce 2.5+. Window auto-sizes to your desktop
 resolution.
