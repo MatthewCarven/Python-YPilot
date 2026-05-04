@@ -30,8 +30,9 @@ See the docstring at the top of `ypilot.py` for the full list. Briefly:
 - **B (hold)** opens the build menu when landed near an unoccupied build pad
 - **+ / -** zoom in/out; **0** resets zoom
 - **/ *** shorten/lengthen the trajectory prediction window
-- **Space** pause + plan-mode "what-if" overlay: mouse aims a burn direction, an orange ghost trajectory shows where the ship would end up if it received an instantaneous delta-v in that direction. Bodies, ship, enemies, fuel all freeze. Use it to plan Hohmann transfers or surface-skim approaches before committing.
-- **[ / ]** (paused only) shorten / lengthen the planned burn duration
+- **Space** pause + plan-mode "what-if" overlay: mouse aims a burn direction, an orange ghost trajectory shows where the ship would end up if it received an instantaneous delta-v in that direction. Bodies, ship, enemies, fuel all freeze. Use it to plan Hohmann transfers or surface-skim approaches before committing. Press Space again to resume without burning.
+- **[ / ]** (paused only) shorten / lengthen the planned burn duration in 0.1s steps. **Ctrl + [ / ]** = 0.01s precision step, **Ctrl+Shift + [ / ]** = 0.001s extra-fine step (mirrors the thrust trim ladder — for trimming Hohmann burns to milliseconds)
+- **Enter** (paused only) commit the planned burn: apply the impulse the orange trajectory shows and unpause. Lifts off automatically if landed.
 - **F11** toggle fullscreen
 - **R** reset world; **Esc** quit
 

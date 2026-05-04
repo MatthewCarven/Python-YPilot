@@ -47,7 +47,12 @@ Controls:
                        delta-v of (SHIP_THRUST * duration) in that direction.
                        Bodies, ship, enemies, fuel all freeze while paused.
     [ / ]              (paused only) shorten / lengthen the planned burn
-                       duration; current value shown on HUD
+                       duration in 0.1s steps; current value shown on HUD
+    Ctrl + [ / ]       (paused only) duration step at 0.01s (precision)
+    Ctrl+Shift + [ / ] (paused only) duration step at 0.001s (extra-fine)
+    Enter              (paused only) commit the planned burn: apply the
+                       impulse the orange trajectory shows and unpause.
+                       Lifts off automatically if landed.
     F11                toggle fullscreen
     F12                save screenshot (PNG) next to ypilot.py
     R                  reset world
@@ -172,9 +177,13 @@ PREDICT_IMPACT_COLOR = (255, 90, 90)
 # short burns (< a few seconds) the impulse model is within a hair of reality
 # and keeps the math one-line.
 PLAN_BURN_DURATION_DEFAULT = 1.0
-PLAN_BURN_DURATION_MIN = 0.1
+PLAN_BURN_DURATION_MIN = 0.001         # lowered to match the fine step;
+                                       # 1ms*220 = 0.22 px/s nudge is the
+                                       # tightest orbital trim available
 PLAN_BURN_DURATION_MAX = 10.0
-PLAN_BURN_DURATION_STEP = 0.1
+PLAN_BURN_DURATION_STEP = 0.1          # plain [ / ]
+PLAN_BURN_DURATION_PRECISION_STEP = 0.01   # Ctrl + [ / ]
+PLAN_BURN_DURATION_FINE_STEP = 0.001       # Ctrl+Shift + [ / ]
 PLAN_COLOR = (255, 170, 90)       # warm orange, distinct from PREDICT cyan
 PLAN_IMPACT_COLOR = (255, 90, 90)
 
@@ -879,6 +888,42 @@ class Ship:
             desired *= (BRAKE_MAX_ACCEL / mag)
         return desired
 
+    def commit_planned_burn(self, burn_dir: Vector2, duration: float) -> bool:
+        """Apply an instantaneous delta-v of (SHIP_THRUST * duration) along
+        burn_dir, matching what the plan-mode predictor showed.
+
+        Returns False if the ship is dead or out of fuel. If fuel is short
+        of `duration`, delivers a proportionally smaller impulse so the
+        burn never costs fuel the ship doesn't have. Unlatches cleanly
+        from the surface if landed, bypassing takeoff_lock_timer -- the
+        player has already chosen the burn direction, the launch-assist
+        would only fight that choice."""
+        if not self.alive:
+            return False
+        if self.fuel <= 0.0:
+            return False
+
+        effective_duration = min(duration, self.fuel)
+        dv_mag = SHIP_THRUST * effective_duration
+
+        if self.landed and self.landed_body is not None:
+            body = self.landed_body
+            radial = Vector2(math.cos(self.landed_radial),
+                             math.sin(self.landed_radial))
+            # Same pad-height bump as the W-press launch path -- protects
+            # against re-grounding when ship inherits frozen body.vel.
+            self.pos = body.pos + radial * (body.radius + LAUNCH_PAD_HEIGHT)
+            self.vel = Vector2(body.vel)
+            self.landed = False
+            self.landed_body = None
+            self.mining_target = None
+            self.takeoff_lock_timer = 0.0  # no lock: player owns direction
+
+        self.vel = self.vel + burn_dir * dv_mag
+        self.angle = math.atan2(burn_dir.y, burn_dir.x)
+        self.fuel = max(0.0, self.fuel - effective_duration)
+        return True
+
     def predict_trajectory(self, bodies: list[Body], t_start: float,
                            seconds: float = PREDICT_SECONDS,
                            dt: float | None = None,
@@ -1301,9 +1346,10 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             lines.append(">> hold B to open build menu <<")
         if paused:
             lines.append("")
-            lines.append(f"PLAN MODE  (paused)   burn {plan_burn_duration:.1f}s "
-                         f"= dv {plan_burn_dv:.0f}")
-            lines.append("  mouse aims burn   [ / ] shorter/longer   Space resume")
+            lines.append(f"PLAN MODE  (paused)   burn {plan_burn_duration:.3f}s "
+                         f"= dv {plan_burn_dv:.1f}")
+            lines.append("  mouse aims burn   [ / ] duration  (Ctrl=0.01s, Ctrl+Shift=0.001s)")
+            lines.append("  Enter commit burn   Space resume without burning")
         lines += [
             "",
             "Mouse aim  W/S/Shift/Ctrl thrust  H brake  B build",
@@ -1442,16 +1488,44 @@ def main() -> None:
                     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
-                elif event.key == pygame.K_LEFTBRACKET and paused:
-                    plan_burn_duration = max(
-                        PLAN_BURN_DURATION_MIN,
-                        plan_burn_duration - PLAN_BURN_DURATION_STEP,
-                    )
-                elif event.key == pygame.K_RIGHTBRACKET and paused:
-                    plan_burn_duration = min(
-                        PLAN_BURN_DURATION_MAX,
-                        plan_burn_duration + PLAN_BURN_DURATION_STEP,
-                    )
+                elif event.key in (pygame.K_LEFTBRACKET,
+                                   pygame.K_RIGHTBRACKET) and paused:
+                    # Step ladder mirrors the thrust trim: plain = coarse,
+                    # Ctrl = precision, Ctrl+Shift = extra-fine. Lets you
+                    # dial in a Hohmann burn to milliseconds.
+                    if (event.mod & pygame.KMOD_CTRL
+                            and event.mod & pygame.KMOD_SHIFT):
+                        step = PLAN_BURN_DURATION_FINE_STEP
+                    elif event.mod & pygame.KMOD_CTRL:
+                        step = PLAN_BURN_DURATION_PRECISION_STEP
+                    else:
+                        step = PLAN_BURN_DURATION_STEP
+                    if event.key == pygame.K_LEFTBRACKET:
+                        plan_burn_duration = max(
+                            PLAN_BURN_DURATION_MIN,
+                            plan_burn_duration - step,
+                        )
+                    else:
+                        plan_burn_duration = min(
+                            PLAN_BURN_DURATION_MAX,
+                            plan_burn_duration + step,
+                        )
+                elif (event.key in (pygame.K_RETURN, pygame.K_KP_ENTER)
+                      and paused):
+                    # Commit the planned burn: apply the impulse the orange
+                    # trajectory shows, then unpause. Burn direction is
+                    # whatever the mouse points to right now; if the cursor
+                    # is in the dead-zone, fall back to the ship's heading.
+                    dx = mouse_pos[0] - WIDTH / 2
+                    dy = mouse_pos[1] - HEIGHT / 2
+                    if dx * dx + dy * dy >= MOUSE_AIM_DEADZONE_SQ:
+                        burn_angle = math.atan2(dy, dx)
+                    else:
+                        burn_angle = ship.angle
+                    burn_dir = Vector2(math.cos(burn_angle),
+                                       math.sin(burn_angle))
+                    if ship.commit_planned_burn(burn_dir, plan_burn_duration):
+                        paused = False
                 elif event.key == pygame.K_F10:
                     enemies_enabled = not enemies_enabled
                     if not enemies_enabled:
@@ -1582,15 +1656,27 @@ def main() -> None:
             burn_dir = Vector2(math.cos(plan_burn_angle),
                                math.sin(plan_burn_angle))
             plan_burn_dv = SHIP_THRUST * plan_burn_duration
-            plan_vel0 = ship.vel + burn_dir * plan_burn_dv
+            # When landed, commit_planned_burn bumps to launch-pad height and
+            # applies the impulse to body.vel. Predict from the same starting
+            # state so the orange line matches what Enter actually delivers.
+            if ship.landed and ship.landed_body is not None:
+                lbody = ship.landed_body
+                lradial = Vector2(math.cos(ship.landed_radial),
+                                  math.sin(ship.landed_radial))
+                plan_pos0 = lbody.pos + lradial * (lbody.radius + LAUNCH_PAD_HEIGHT)
+                plan_vel0 = lbody.vel + burn_dir * plan_burn_dv
+            else:
+                plan_pos0 = None  # falls back to ship.pos
+                plan_vel0 = ship.vel + burn_dir * plan_burn_dv
             plan_traj, plan_impact = ship.predict_trajectory(
                 bodies, sim_time, seconds=predict_seconds,
-                vel0=plan_vel0,
+                pos0=plan_pos0, vel0=plan_vel0,
             )
             draw_plan_trajectory(screen, camera, plan_traj, plan_impact)
-            # Burn-vector arrow at the ship: visual cue that this orange
-            # trajectory is the result of a thrust in this direction.
-            sx, sy = camera.world_to_screen_int(ship.pos)
+            # Burn-vector arrow anchored where the burn actually starts (so
+            # when landed it sits at launch-pad height, not on the surface).
+            arrow_origin = plan_pos0 if plan_pos0 is not None else ship.pos
+            sx, sy = camera.world_to_screen_int(arrow_origin)
             arrow_len = min(80, 12 + plan_burn_duration * 14)
             ex = int(sx + math.cos(plan_burn_angle) * arrow_len)
             ey = int(sy + math.sin(plan_burn_angle) * arrow_len)
