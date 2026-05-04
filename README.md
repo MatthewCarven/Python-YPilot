@@ -2,7 +2,10 @@
 
 A 2D space-flight game in Python + pygame-ce. Orbit a planet under Newtonian
 gravity, mine ore from surface deposits, construct auto-aim turrets at build
-pads, and defend against UFOs that drift in from off-screen.
+pads, and defend against UFOs that drift in from off-screen. There's also
+a second planet — **Ember**, a rust-coloured wilderness world at orbit
+radius 1800 — for when home gets boring; a Hohmann transfer takes about
+52 seconds.
 
 ## Run
 
@@ -20,13 +23,15 @@ resolution.
 See the docstring at the top of `ypilot.py` for the full list. Briefly:
 
 - **Mouse** aims the ship's nose
-- **W / Shift+W / Ctrl+W** thrust forward (nominal / 5x boost / 10% precision). On takeoff from the surface, the ship auto-commits to full vertical boost for ~0.3s regardless of input — gives a clean launch
-- **S** retro-thrust at 10% of forward
+- **W / Shift+W / Ctrl+W / Ctrl+Shift+W** thrust forward (nominal / 5x boost / 1% precision / 0.1% extra-fine trim). On takeoff from the surface, the ship auto-commits to full vertical boost for ~0.3s regardless of input — gives a clean launch
+- **S / Ctrl+S / Ctrl+Shift+S** retro-thrust (10% / 1% precision / 0.1% extra-fine trim)
 - **Q / E** strafe left / right at 10% of forward (perpendicular to nose; does NOT cancel autopilot, so you can hover-hold + Q/E to align over a build pad)
 - **H** toggles brake-assist autopilot. By default it matches the velocity of the nearest landable body, so a "stop" really means "match the planet" — landings on a moving body just work. **Shift** while H is on = hover-hold (zero only radial velocity, drift tangentially — useful for lining up over a build pad). **Ctrl** while H is on = damp to 0.25x strength (fine soft landings; stacks with Shift).
 - **B (hold)** opens the build menu when landed near an unoccupied build pad
 - **+ / -** zoom in/out; **0** resets zoom
 - **/ *** shorten/lengthen the trajectory prediction window
+- **Space** pause + plan-mode "what-if" overlay: mouse aims a burn direction, an orange ghost trajectory shows where the ship would end up if it received an instantaneous delta-v in that direction. Bodies, ship, enemies, fuel all freeze. Use it to plan Hohmann transfers or surface-skim approaches before committing.
+- **[ / ]** (paused only) shorten / lengthen the planned burn duration
 - **F11** toggle fullscreen
 - **R** reset world; **Esc** quit
 
@@ -213,9 +218,12 @@ problem.
 | `TAKEOFF_LOCK_SECONDS` | 0.30 | Lock window after liftoff (user-tuned by feel) |
 | `LAUNCH_PAD_HEIGHT` | 5.0 | Pre-takeoff radial bump; must exceed `body.vel * dt + safety` |
 | `LATERAL_THRUST_SCALE` | 0.1 | Q/E strafe magnitude |
-| `RETRO_THRUST_SCALE` | 0.1 | S retro magnitude |
+| `RETRO_THRUST_SCALE` | 0.1 | S retro magnitude (default, 10%) |
+| `RETRO_PRECISION_SCALE` | 0.01 | Ctrl+S retro (1% precision) |
+| `RETRO_FINE_SCALE` | 0.001 | Ctrl+Shift+S retro (0.1% extra-fine) |
 | `THRUST_BOOST_SCALE` | 5.0 | Shift+W boost |
-| `THRUST_PRECISION_SCALE` | 0.1 | Ctrl+W precision |
+| `THRUST_PRECISION_SCALE` | 0.01 | Ctrl+W precision (1%) |
+| `THRUST_FINE_SCALE` | 0.001 | Ctrl+Shift+W extra-fine (0.1%) |
 | `BRAKE_KP` | 2.0 | Autopilot PD gain |
 | `BRAKE_MAX_ACCEL` | 660 | Autopilot output cap (= 3 × `SHIP_THRUST`) |
 | `LAND_SPEED_MAX` | 35 | Landing rel-speed limit |
@@ -262,10 +270,13 @@ control" gestures, while strafe is a "nudge while autopilot holds position"
 gesture.
 
 **Trim modifiers blocked when any thrust pressed.** Hover-hold (Shift) and
-damp (Ctrl) would deactivate even on Q/E or S. Fix: gate the trim modifier
-reads on forward thrust only, since only forward thrust uses Shift/Ctrl as
-scale modifiers. Strafe and retro don't use modifiers, so they shouldn't
-suppress the trim.
+damp (Ctrl) would deactivate even on Q/E. Fix: gate the trim modifier
+reads on forward AND retro only — both use Shift/Ctrl as scale modifiers
+(forward: Shift=boost, Ctrl=precision, Ctrl+Shift=extra-fine; retro:
+Ctrl=precision, Ctrl+Shift=extra-fine). Strafe doesn't use modifiers, so
+Q/E never suppresses the trim. Note: pressing forward or retro already
+cancels brake-assist, so this gate is technically defensive — but explicit
+is better than relying on the cancel ordering.
 
 ### Visual conventions
 

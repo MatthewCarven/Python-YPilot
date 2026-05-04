@@ -20,8 +20,11 @@ Controls:
     Right / D          rotate clockwise        (keyboard fallback)
     Up    / W          thrust forward
     Shift + Up/W       thrust forward at 5x normal (boost - escape velocity)
-    Ctrl  + Up/W       thrust forward at 10% normal (precision)
+    Ctrl  + Up/W       thrust forward at 1% normal (precision)
+    Ctrl+Shift + Up/W  thrust forward at 0.1% normal (extra-fine trim)
     Down  / S          retro-thrust at 10% of forward power
+    Ctrl  + Down/S     retro-thrust at 1% (precision)
+    Ctrl+Shift + Down/S retro-thrust at 0.1% (extra-fine trim)
     Q                  strafe left at 10% of forward power
     E                  strafe right at 10% of forward power
     H                  toggle brake assist (autopilot matches velocity of
@@ -38,6 +41,13 @@ Controls:
     /                  shorter trajectory prediction window (down to 5s)
     *                  longer trajectory prediction window (up to 5min)
     F10                toggle enemy spawns (also clears any in scene)
+    Space              pause + plan-mode "what-if" overlay. Mouse aims a
+                       burn direction; an orange ghost trajectory shows where
+                       the ship would end up if it received an instantaneous
+                       delta-v of (SHIP_THRUST * duration) in that direction.
+                       Bodies, ship, enemies, fuel all freeze while paused.
+    [ / ]              (paused only) shorten / lengthen the planned burn
+                       duration; current value shown on HUD
     F11                toggle fullscreen
     F12                save screenshot (PNG) next to ypilot.py
     R                  reset world
@@ -83,6 +93,17 @@ PLANET_RIM = (40, 90, 150)
 PLANET_ORBIT_RADIUS = 800.0
 PLANET_INITIAL_PHASE = 0.0
 
+# --- Planet 2: Ember (outer wilderness) ------------------------------------
+# Heavier, larger, slower, and rust-coloured. No deposits or build pads --
+# pure destination for now. Hohmann transfer from PLANET orbit takes ~52s.
+PLANET2_NAME = "Ember"
+PLANET2_RADIUS = 110.0
+PLANET2_MU = 6_000_000.0
+PLANET2_COLOR = (200, 100, 70)
+PLANET2_RIM = (140, 60, 40)
+PLANET2_ORBIT_RADIUS = 1800.0
+PLANET2_INITIAL_PHASE = math.pi * 0.6
+
 # --- Ship -------------------------------------------------------------------
 SHIP_THRUST = 220.0
 SHIP_TURN_RATE = math.radians(180)
@@ -93,11 +114,14 @@ FLAME_COLOR = (255, 170, 60)
 RETRO_FLAME_COLOR = (180, 200, 255)
 LANDED_RING_COLOR = (140, 220, 140)
 
-THRUST_BOOST_SCALE = 5.0
-THRUST_PRECISION_SCALE = 0.1
-RETRO_THRUST_SCALE = 0.1
+THRUST_BOOST_SCALE = 5.0         # Shift + W/Up
+THRUST_PRECISION_SCALE = 0.01    # Ctrl + W/Up        (1% of nominal)
+THRUST_FINE_SCALE = 0.001        # Ctrl+Shift + W/Up  (0.1% of nominal)
+RETRO_THRUST_SCALE = 0.1         # S/Down             (default retro: 10%)
+RETRO_PRECISION_SCALE = 0.01     # Ctrl + S/Down      (1% retro)
+RETRO_FINE_SCALE = 0.001         # Ctrl+Shift + S/Down (0.1% retro)
 LATERAL_THRUST_SCALE = 0.1       # Q / E strafe thrusters; same magnitude
-                                 # as retro for symmetric feel
+                                 # as default retro for symmetric feel
 
 MOUSE_AIM_DEADZONE_SQ = 9.0
 
@@ -138,6 +162,21 @@ PREDICT_TARGET_STEPS = 6400      # cap total steps so 5min predictions stay chea
 PREDICT_DRAW_STRIDE = 6
 PREDICT_COLOR = (90, 200, 255)
 PREDICT_IMPACT_COLOR = (255, 90, 90)
+
+# --- Plan-mode (pause + what-if overlay) -----------------------------------
+# Spacebar pauses the world (bodies, ship, enemies, bullets, fuel all freeze).
+# While paused, the mouse aims a burn direction and `[` / `]` shorten/lengthen
+# the planned burn duration. The overlay draws the trajectory the ship would
+# follow if it were given an instantaneous delta-v of (SHIP_THRUST * duration)
+# in the aimed direction. Approximation: real burns happen over time, but for
+# short burns (< a few seconds) the impulse model is within a hair of reality
+# and keeps the math one-line.
+PLAN_BURN_DURATION_DEFAULT = 1.0
+PLAN_BURN_DURATION_MIN = 0.1
+PLAN_BURN_DURATION_MAX = 10.0
+PLAN_BURN_DURATION_STEP = 0.1
+PLAN_COLOR = (255, 170, 90)       # warm orange, distinct from PREDICT cyan
+PLAN_IMPACT_COLOR = (255, 90, 90)
 
 # --- Mining / resources -----------------------------------------------------
 NUM_DEPOSITS = 6
@@ -280,7 +319,13 @@ def make_solar_system() -> list[Body]:
         parent=sun, orbit_radius=PLANET_ORBIT_RADIUS,
         phase=PLANET_INITIAL_PHASE, landable=True,
     )
-    return [sun, planet]
+    ember = Body(
+        PLANET2_NAME, radius=PLANET2_RADIUS, mu=PLANET2_MU,
+        color=PLANET2_COLOR, rim=PLANET2_RIM,
+        parent=sun, orbit_radius=PLANET2_ORBIT_RADIUS,
+        phase=PLANET2_INITIAL_PHASE, landable=True,
+    )
+    return [sun, planet, ember]
 
 
 def update_bodies(bodies: list[Body], t: float) -> None:
@@ -426,11 +471,11 @@ class Enemy:
                 break
 
 
-def spawn_enemy(planet: Body) -> Enemy:
+def spawn_enemy(target_body: Body) -> Enemy:
     a = random.uniform(0.0, 2.0 * math.pi)
     radial = Vector2(math.cos(a), math.sin(a))
-    pos = planet.pos + radial * ENEMY_SPAWN_DISTANCE
-    inward = (planet.pos - pos).normalize()
+    pos = target_body.pos + radial * ENEMY_SPAWN_DISTANCE
+    inward = (target_body.pos - pos).normalize()
     jitter_angle = random.uniform(-math.radians(15), math.radians(15))
     inward = inward.rotate_rad(jitter_angle)
     return Enemy(pos, inward * ENEMY_SPEED)
@@ -537,6 +582,7 @@ class Ship:
         self.strafing_left = False
         self.strafing_right = False
         self.thrust_scale = 1.0
+        self.retro_scale = RETRO_THRUST_SCALE
         self.brake_assist = False
         self.brake_assist_scale = 1.0
         self.hover_hold = False
@@ -641,7 +687,7 @@ class Ship:
         if self.thrusting:
             burn += self.thrust_scale * dt
         if self.retro_thrusting:
-            burn += RETRO_THRUST_SCALE * dt
+            burn += self.retro_scale * dt
         if self.strafing_left:
             burn += LATERAL_THRUST_SCALE * dt
         if self.strafing_right:
@@ -709,23 +755,43 @@ class Ship:
         strafe_left_pressed = bool(keys[pygame.K_q])
         strafe_right_pressed = bool(keys[pygame.K_e])
 
+        shift = bool(mods & pygame.KMOD_SHIFT)
+        ctrl  = bool(mods & pygame.KMOD_CTRL)
+
         self.thrusting = False
         self.retro_thrusting = False
         self.strafing_left = False
         self.strafing_right = False
 
+        # Forward thrust trim ladder:
+        #   plain         = 1.0         (nominal)
+        #   Shift         = 5.0         (boost, for escape velocity)
+        #   Ctrl          = 0.01        (precision)
+        #   Ctrl+Shift    = 0.001       (extra-fine)
         if forward_pressed:
             self.brake_assist = False
-            if mods & pygame.KMOD_SHIFT:
+            if ctrl and shift:
+                self.thrust_scale = THRUST_FINE_SCALE
+            elif shift:
                 self.thrust_scale = THRUST_BOOST_SCALE
-            elif mods & pygame.KMOD_CTRL:
+            elif ctrl:
                 self.thrust_scale = THRUST_PRECISION_SCALE
             else:
                 self.thrust_scale = 1.0
             self.thrusting = True
 
+        # Retro thrust trim ladder (mirrors forward, no boost step):
+        #   plain         = RETRO_THRUST_SCALE      (10%)
+        #   Ctrl          = RETRO_PRECISION_SCALE   (1%)
+        #   Ctrl+Shift    = RETRO_FINE_SCALE        (0.1%)
         if reverse_pressed:
             self.brake_assist = False
+            if ctrl and shift:
+                self.retro_scale = RETRO_FINE_SCALE
+            elif ctrl:
+                self.retro_scale = RETRO_PRECISION_SCALE
+            else:
+                self.retro_scale = RETRO_THRUST_SCALE
             self.retro_thrusting = True
 
         # Strafe does NOT cancel brake-assist. Forward and retro are
@@ -738,12 +804,12 @@ class Ship:
             self.strafing_right = True
 
         # Trim modifiers (Shift hover-hold, Ctrl damp) only apply when
-        # forward thrust isn't pressed -- Shift/Ctrl are also forward-
-        # thrust scale modifiers, so we'd have a conflict otherwise.
-        # Strafe and retro don't use Shift/Ctrl, so they don't conflict.
-        if self.brake_assist and not forward_pressed:
-            self.hover_hold = bool(mods & pygame.KMOD_SHIFT)
-            self.brake_assist_scale = 0.25 if (mods & pygame.KMOD_CTRL) else 1.0
+        # neither forward nor reverse is pressed -- Shift/Ctrl double as
+        # thrust scale modifiers in those cases, so we'd have a conflict.
+        # Strafe doesn't use Shift/Ctrl, so it never conflicts here.
+        if self.brake_assist and not forward_pressed and not reverse_pressed:
+            self.hover_hold = shift
+            self.brake_assist_scale = 0.25 if ctrl else 1.0
         else:
             self.hover_hold = False
             self.brake_assist_scale = 1.0
@@ -756,7 +822,7 @@ class Ship:
         if self.thrusting:
             accel += forward_dir * (SHIP_THRUST * self.thrust_scale)
         if self.retro_thrusting:
-            accel -= forward_dir * (SHIP_THRUST * RETRO_THRUST_SCALE)
+            accel -= forward_dir * (SHIP_THRUST * self.retro_scale)
 
         # Lateral strafe thrusters: perpendicular to the nose. In pygame
         # screen coords (+y down), -90 deg rotation of forward gives
@@ -815,16 +881,21 @@ class Ship:
 
     def predict_trajectory(self, bodies: list[Body], t_start: float,
                            seconds: float = PREDICT_SECONDS,
-                           dt: float | None = None) -> tuple[list[Vector2], float | None]:
+                           dt: float | None = None,
+                           pos0: Vector2 | None = None,
+                           vel0: Vector2 | None = None
+                           ) -> tuple[list[Vector2], float | None]:
         # Scale dt with prediction length so cost stays bounded. For short
         # windows we use the sim's native dt; for very long windows we step
         # in larger jumps (sacrificing precision for predictive reach -- the
         # 3-body system is chaotic over long horizons anyway).
+        # pos0/vel0 override the ship's current state -- used by plan-mode
+        # to predict from a hypothetical post-burn velocity.
         if dt is None:
             dt = max(PREDICT_DT_MIN, seconds / PREDICT_TARGET_STEPS)
         n = max(2, int(seconds / dt))
-        pos = Vector2(self.pos)
-        vel = Vector2(self.vel)
+        pos = Vector2(pos0) if pos0 is not None else Vector2(self.pos)
+        vel = Vector2(vel0) if vel0 is not None else Vector2(self.vel)
         points = [Vector2(pos)]
         impact_speed = None
         for i in range(n):
@@ -1103,6 +1174,38 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
         pygame.draw.circle(surf, color, ip, 2)
 
 
+def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
+                         points: list[Vector2],
+                         impact_speed: float | None) -> None:
+    """Plan-mode counterpart to draw_trajectory: orange ribbon, same fade/stride.
+
+    Drawn separately rather than parameterised onto draw_trajectory because the
+    impact end-marker uses a different palette (plan-mode impact is purely
+    informational, not a forecast)."""
+    if len(points) < 2:
+        return
+    n = len(points)
+    bg_r, bg_g, bg_b = BG
+    base_r, base_g, base_b = PLAN_COLOR
+    stride = PREDICT_DRAW_STRIDE
+    last_screen = None
+    for i in range(0, n, stride):
+        sp = camera.world_to_screen_int(points[i])
+        if last_screen is not None:
+            t = i / (n - 1)
+            r = int(base_r * (1 - t) + bg_r * t)
+            g = int(base_g * (1 - t) + bg_g * t)
+            b = int(base_b * (1 - t) + bg_b * t)
+            pygame.draw.line(surf, (r, g, b), last_screen, sp, 1)
+        last_screen = sp
+
+    if impact_speed is not None:
+        ip = camera.world_to_screen_int(points[-1])
+        color = LANDED_RING_COLOR if impact_speed <= LAND_SPEED_MAX else PLAN_IMPACT_COLOR
+        pygame.draw.circle(surf, color, ip, 5, 1)
+        pygame.draw.circle(surf, color, ip, 2)
+
+
 def draw_mining_beam(surf: pygame.Surface, camera: Camera, ship_pos: Vector2, target: Deposit) -> None:
     sp = camera.world_to_screen_int(ship_pos)
     dp = camera.world_to_screen_int(target.pos)
@@ -1126,16 +1229,30 @@ def draw_fuel_bar(surf: pygame.Surface, x: int, y: int, w: int, h: int,
         pygame.draw.rect(surf, fill_color, (x + 1, y + 1, fill_w, h - 2))
 
 
-def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: Body, sun: Body,
+def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
+             bodies: list[Body], sun: Body,
              enemies: list[Enemy], turrets: list[Turret], build_prompt: bool,
              zoom: float, predict_seconds: float,
-             kills: int, enemies_enabled: bool) -> None:
+             kills: int, enemies_enabled: bool,
+             paused: bool = False, plan_burn_duration: float = 0.0,
+             plan_burn_dv: float = 0.0) -> None:
     if ship.alive:
-        r_planet = (ship.pos - planet.pos).length()
-        altitude = max(0.0, r_planet - planet.radius)
-        rel_vel = ship.vel - planet.vel
-        speed_rel = rel_vel.length()
-        v_circ = circular_orbit_speed(planet, r_planet) if r_planet > 0 else 0.0
+        # Anchor altitude / rel-speed / v_circ to whichever landable body is
+        # currently closest. As the player approaches Ember, the HUD silently
+        # retargets to it -- no manual switch needed.
+        nearest = nearest_landable(ship.pos, bodies)
+        if nearest is not None:
+            r_body = (ship.pos - nearest.pos).length()
+            altitude = max(0.0, r_body - nearest.radius)
+            rel_vel = ship.vel - nearest.vel
+            speed_rel = rel_vel.length()
+            v_circ = circular_orbit_speed(nearest, r_body) if r_body > 0 else 0.0
+            body_label = nearest.name
+        else:
+            altitude = 0.0
+            speed_rel = ship.vel.length()
+            v_circ = 0.0
+            body_label = "(deep space)"
         d_sun = (ship.pos - sun.pos).length()
 
         if ship.thrusting and ship.thrust_scale != 1.0:
@@ -1149,8 +1266,8 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: B
         live_turrets = sum(1 for t in turrets if t.alive)
 
         lines = [
-            f"Altitude:    {altitude:7.1f}    (vs planet)",
-            f"Rel speed:   {speed_rel:7.1f}    (vs planet)",
+            f"Altitude:    {altitude:7.1f}    (vs {body_label})",
+            f"Rel speed:   {speed_rel:7.1f}    (vs {body_label})",
             f"v_circ here: {v_circ:7.1f}",
             f"Sun dist:    {d_sun:7.0f}",
             f"Fuel:        {ship.fuel:6.2f} / {MAX_FUEL:.0f}",
@@ -1162,9 +1279,9 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: B
         if thrust_label:
             lines.append(thrust_label)
         if ship.retro_thrusting:
-            lines.append("Retro:       on (10%)")
+            lines.append(f"Retro:       on ({ship.retro_scale * 100.0:g}%)")
         if ship.brake_assist:
-            target = nearest_landable(ship.pos, [sun, planet])
+            target = nearest_landable(ship.pos, bodies)
             mode = f"matching {target.name}" if target is not None else "zeroing velocity"
             extras = []
             if ship.hover_hold:
@@ -1182,10 +1299,16 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship, planet: B
             lines.append("OUT OF FUEL")
         if build_prompt:
             lines.append(">> hold B to open build menu <<")
+        if paused:
+            lines.append("")
+            lines.append(f"PLAN MODE  (paused)   burn {plan_burn_duration:.1f}s "
+                         f"= dv {plan_burn_dv:.0f}")
+            lines.append("  mouse aims burn   [ / ] shorter/longer   Space resume")
         lines += [
             "",
             "Mouse aim  W/S/Shift/Ctrl thrust  H brake  B build",
             "+/- zoom  0 reset zoom  / shorter * longer predict",
+            "Space pause+plan   [ ] burn duration",
             "F11 fullscreen  R reset world  Esc quit",
         ]
         color = (220, 220, 220)
@@ -1293,6 +1416,9 @@ def main() -> None:
     fullscreen = False
     predict_seconds = PREDICT_SECONDS
 
+    paused = False
+    plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+
     running = True
     while running:
         dt = clock.tick(FPS) / 1000.0
@@ -1312,6 +1438,20 @@ def main() -> None:
                     ship.reset(planet)
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                     kills = 0
+                    paused = False
+                    plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                elif event.key == pygame.K_SPACE:
+                    paused = not paused
+                elif event.key == pygame.K_LEFTBRACKET and paused:
+                    plan_burn_duration = max(
+                        PLAN_BURN_DURATION_MIN,
+                        plan_burn_duration - PLAN_BURN_DURATION_STEP,
+                    )
+                elif event.key == pygame.K_RIGHTBRACKET and paused:
+                    plan_burn_duration = min(
+                        PLAN_BURN_DURATION_MAX,
+                        plan_burn_duration + PLAN_BURN_DURATION_STEP,
+                    )
                 elif event.key == pygame.K_F10:
                     enemies_enabled = not enemies_enabled
                     if not enemies_enabled:
@@ -1357,7 +1497,11 @@ def main() -> None:
         candidate_pad = nearest_unoccupied_pad(ship, pads)
         in_build_mode = build_held and candidate_pad is not None
 
-        if not in_build_mode:
+        # Plan mode (Space): freeze the entire simulation -- bodies, ship,
+        # enemies, bullets, turrets, fuel/refuel. Time t doesn't advance, so
+        # body rails stay frozen too. The render block still runs and draws
+        # an alternate trajectory based on the planned burn.
+        if not in_build_mode and not paused:
             sim_time += dt
             update_bodies(bodies, sim_time)
 
@@ -1368,7 +1512,13 @@ def main() -> None:
             if enemies_enabled:
                 enemy_spawn_timer -= dt
                 if enemy_spawn_timer <= 0.0:
-                    enemies.append(spawn_enemy(planet))
+                    # Spawn around whichever landable body the ship is
+                    # closest to, so enemies arrive where the action is.
+                    spawn_target = (nearest_landable(ship.pos, bodies)
+                                    if ship.alive else planet)
+                    if spawn_target is None:
+                        spawn_target = planet
+                    enemies.append(spawn_enemy(spawn_target))
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL
 
             ship_pos = ship.pos if ship.alive else None
@@ -1419,6 +1569,33 @@ def main() -> None:
             )
             draw_trajectory(screen, camera, traj, impact_speed)
 
+        # Plan-mode "what-if" overlay: same predictor, but with an instantaneous
+        # delta-v added to the ship's current velocity in the mouse-aimed direction.
+        # Drawn even when landed -- planning takeoff burns is a useful case.
+        plan_burn_dv = 0.0
+        plan_burn_angle = ship.angle
+        if paused and ship.alive:
+            dx = mouse_pos[0] - WIDTH / 2
+            dy = mouse_pos[1] - HEIGHT / 2
+            if dx * dx + dy * dy >= MOUSE_AIM_DEADZONE_SQ:
+                plan_burn_angle = math.atan2(dy, dx)
+            burn_dir = Vector2(math.cos(plan_burn_angle),
+                               math.sin(plan_burn_angle))
+            plan_burn_dv = SHIP_THRUST * plan_burn_duration
+            plan_vel0 = ship.vel + burn_dir * plan_burn_dv
+            plan_traj, plan_impact = ship.predict_trajectory(
+                bodies, sim_time, seconds=predict_seconds,
+                vel0=plan_vel0,
+            )
+            draw_plan_trajectory(screen, camera, plan_traj, plan_impact)
+            # Burn-vector arrow at the ship: visual cue that this orange
+            # trajectory is the result of a thrust in this direction.
+            sx, sy = camera.world_to_screen_int(ship.pos)
+            arrow_len = min(80, 12 + plan_burn_duration * 14)
+            ex = int(sx + math.cos(plan_burn_angle) * arrow_len)
+            ey = int(sy + math.sin(plan_burn_angle) * arrow_len)
+            pygame.draw.line(screen, PLAN_COLOR, (sx, sy), (ex, ey), 2)
+
         for body in bodies:
             draw_body(screen, camera, body)
 
@@ -1439,9 +1616,11 @@ def main() -> None:
         ship.draw(screen, camera)
 
         build_prompt = (candidate_pad is not None) and not build_held
-        draw_hud(screen, font, ship, planet, sun, enemies, turrets,
+        draw_hud(screen, font, ship, bodies, sun, enemies, turrets,
                  build_prompt, camera.zoom, predict_seconds,
-                 kills, enemies_enabled)
+                 kills, enemies_enabled,
+                 paused=paused, plan_burn_duration=plan_burn_duration,
+                 plan_burn_dv=plan_burn_dv)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)
