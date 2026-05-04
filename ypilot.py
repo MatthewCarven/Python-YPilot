@@ -50,6 +50,7 @@ Controls:
                        duration in 0.1s steps; current value shown on HUD
     Ctrl + [ / ]       (paused only) duration step at 0.01s (precision)
     Ctrl+Shift + [ / ] (paused only) duration step at 0.001s (extra-fine)
+    Alt + [ / ]        (paused only) duration step at 0.0001s (super-fine)
     Enter              (paused only) commit the planned burn: apply the
                        impulse the orange trajectory shows and unpause.
                        Lifts off automatically if landed.
@@ -77,6 +78,15 @@ from pygame.math import Vector2
 WIDTH, HEIGHT = 1280, 720
 FPS = 60
 BG = (8, 8, 20)
+
+# --- Physics timestep -------------------------------------------------------
+# Live sim runs in fixed PHYSICS_DT chunks via a wall-time accumulator. The
+# predictor uses the same PHYSICS_DT for short/medium horizons so the planned
+# orange ghost is bit-equivalent to the trajectory the live integrator will
+# fly (ignoring chaos amplification of any residual diffs). MAX_FRAME_DT caps
+# the per-frame catch-up after a stall so we don't spiral after a hitch.
+PHYSICS_DT = 1.0 / FPS
+MAX_FRAME_DT = 0.25
 
 # --- Zoom -------------------------------------------------------------------
 ZOOM_MIN = 0.25
@@ -162,7 +172,6 @@ PREDICT_SECONDS = 30.0           # default look-ahead
 PREDICT_MIN_SECONDS = 5.0        # `/` key floor
 PREDICT_MAX_SECONDS = 1000.0     # `*` key ceiling (~16.7 minutes)
 PREDICT_STEP = 1.5               # multiplicative step per `/` or `*` press
-PREDICT_DT_MIN = 1.0 / 60.0      # smallest sim step (used for short windows)
 PREDICT_TARGET_STEPS = 6400      # cap total steps so 5min predictions stay cheap
 PREDICT_DRAW_STRIDE = 6
 PREDICT_COLOR = (90, 200, 255)
@@ -177,13 +186,14 @@ PREDICT_IMPACT_COLOR = (255, 90, 90)
 # short burns (< a few seconds) the impulse model is within a hair of reality
 # and keeps the math one-line.
 PLAN_BURN_DURATION_DEFAULT = 1.0
-PLAN_BURN_DURATION_MIN = 0.001         # lowered to match the fine step;
-                                       # 1ms*220 = 0.22 px/s nudge is the
+PLAN_BURN_DURATION_MIN = 0.0001        # lowered to match the super-fine step;
+                                       # 0.1ms*220 = 0.022 px/s nudge is the
                                        # tightest orbital trim available
 PLAN_BURN_DURATION_MAX = 10.0
-PLAN_BURN_DURATION_STEP = 0.1          # plain [ / ]
-PLAN_BURN_DURATION_PRECISION_STEP = 0.01   # Ctrl + [ / ]
-PLAN_BURN_DURATION_FINE_STEP = 0.001       # Ctrl+Shift + [ / ]
+PLAN_BURN_DURATION_STEP = 0.1               # plain [ / ]
+PLAN_BURN_DURATION_PRECISION_STEP = 0.01    # Ctrl + [ / ]
+PLAN_BURN_DURATION_FINE_STEP = 0.001        # Ctrl+Shift + [ / ]
+PLAN_BURN_DURATION_SUPERFINE_STEP = 0.0001  # Alt + [ / ]
 PLAN_COLOR = (255, 170, 90)       # warm orange, distinct from PREDICT cyan
 PLAN_IMPACT_COLOR = (255, 90, 90)
 
@@ -930,23 +940,27 @@ class Ship:
                            pos0: Vector2 | None = None,
                            vel0: Vector2 | None = None
                            ) -> tuple[list[Vector2], float | None]:
-        # Scale dt with prediction length so cost stays bounded. For short
-        # windows we use the sim's native dt; for very long windows we step
-        # in larger jumps (sacrificing precision for predictive reach -- the
-        # 3-body system is chaotic over long horizons anyway).
+        # Use PHYSICS_DT so the integrator matches the live sim step-for-step
+        # over short/medium horizons -- the predicted ghost is then bit-
+        # equivalent to what the live integrator will fly. Only coarsen for
+        # very long windows where the step budget would blow up; chaos already
+        # dominates those horizons regardless of dt.
+        # Body-time sampling: live evaluates gravity_at(body.pos) where bodies
+        # are pinned to sim_time = step end (update_bodies runs before
+        # ship.update). We mirror that here by sampling bodies at t_end for
+        # both half-kicks of the leapfrog, so the force model is identical.
         # pos0/vel0 override the ship's current state -- used by plan-mode
         # to predict from a hypothetical post-burn velocity.
         if dt is None:
-            dt = max(PREDICT_DT_MIN, seconds / PREDICT_TARGET_STEPS)
+            dt = max(PHYSICS_DT, seconds / PREDICT_TARGET_STEPS)
         n = max(2, int(seconds / dt))
         pos = Vector2(pos0) if pos0 is not None else Vector2(self.pos)
         vel = Vector2(vel0) if vel0 is not None else Vector2(self.vel)
         points = [Vector2(pos)]
         impact_speed = None
         for i in range(n):
-            t0 = t_start + i * dt
             t2 = t_start + (i + 1) * dt
-            a0 = gravity_at_t(pos, t0, bodies)
+            a0 = gravity_at_t(pos, t2, bodies)
             v_half = vel + a0 * (dt * 0.5)
             pos = pos + v_half * dt
             a1 = gravity_at_t(pos, t2, bodies)
@@ -1194,6 +1208,14 @@ def draw_enemy(surf: pygame.Surface, camera: Camera, e: Enemy) -> None:
     pygame.draw.circle(surf, ENEMY_RIM, (int(sx), int(sy)), r, 1)
 
 
+def _ghost_thickness(t: float) -> int:
+    # Fattening ribbon expresses chaos uncertainty: even with bit-faithful
+    # integration, a 3-body trajectory's true position spreads exponentially
+    # with horizon. The fade lerp toward BG already softens; the thickness
+    # ramp (1 -> 3 px) adds a visible "cone of doubt" cue further out.
+    return 1 + int(t * 2)
+
+
 def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2], impact_speed: float | None) -> None:
     if len(points) < 2:
         return
@@ -1202,6 +1224,7 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
     base_r, base_g, base_b = PREDICT_COLOR
     stride = PREDICT_DRAW_STRIDE
     last_screen = None
+    last_t = 0.0
     for i in range(0, n, stride):
         sp = camera.world_to_screen_int(points[i])
         if last_screen is not None:
@@ -1209,7 +1232,9 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
             r = int(base_r * (1 - t) + bg_r * t)
             g = int(base_g * (1 - t) + bg_g * t)
             b = int(base_b * (1 - t) + bg_b * t)
-            pygame.draw.line(surf, (r, g, b), last_screen, sp, 1)
+            pygame.draw.line(surf, (r, g, b), last_screen, sp,
+                             _ghost_thickness(0.5 * (last_t + t)))
+            last_t = t
         last_screen = sp
 
     if impact_speed is not None:
@@ -1234,6 +1259,7 @@ def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
     base_r, base_g, base_b = PLAN_COLOR
     stride = PREDICT_DRAW_STRIDE
     last_screen = None
+    last_t = 0.0
     for i in range(0, n, stride):
         sp = camera.world_to_screen_int(points[i])
         if last_screen is not None:
@@ -1241,7 +1267,9 @@ def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
             r = int(base_r * (1 - t) + bg_r * t)
             g = int(base_g * (1 - t) + bg_g * t)
             b = int(base_b * (1 - t) + bg_b * t)
-            pygame.draw.line(surf, (r, g, b), last_screen, sp, 1)
+            pygame.draw.line(surf, (r, g, b), last_screen, sp,
+                             _ghost_thickness(0.5 * (last_t + t)))
+            last_t = t
         last_screen = sp
 
     if impact_speed is not None:
@@ -1348,7 +1376,7 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             lines.append("")
             lines.append(f"PLAN MODE  (paused)   burn {plan_burn_duration:.3f}s "
                          f"= dv {plan_burn_dv:.1f}")
-            lines.append("  mouse aims burn   [ / ] duration  (Ctrl=0.01s, Ctrl+Shift=0.001s)")
+            lines.append("  mouse aims burn   [ / ] duration  (Ctrl=0.01s, Ctrl+Shift=0.001s, Alt=0.0001s)")
             lines.append("  Enter commit burn   Space resume without burning")
         lines += [
             "",
@@ -1465,9 +1493,14 @@ def main() -> None:
     paused = False
     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
 
+    # Wall-time accumulator for the fixed-timestep physics loop. Frames feed
+    # measured wall time in; physics drains it in PHYSICS_DT chunks. Capped at
+    # MAX_FRAME_DT so a stall doesn't cause a burst of catch-up steps.
+    physics_accumulator = 0.0
+
     running = True
     while running:
-        dt = clock.tick(FPS) / 1000.0
+        frame_dt = clock.tick(FPS) / 1000.0
 
         mouse_pos = pygame.mouse.get_pos()
         mouse_clicked = False
@@ -1491,9 +1524,12 @@ def main() -> None:
                 elif event.key in (pygame.K_LEFTBRACKET,
                                    pygame.K_RIGHTBRACKET) and paused:
                     # Step ladder mirrors the thrust trim: plain = coarse,
-                    # Ctrl = precision, Ctrl+Shift = extra-fine. Lets you
-                    # dial in a Hohmann burn to milliseconds.
-                    if (event.mod & pygame.KMOD_CTRL
+                    # Ctrl = precision, Ctrl+Shift = extra-fine, Alt =
+                    # super-fine. Lets you dial in a Hohmann burn to
+                    # tenths of a millisecond.
+                    if event.mod & pygame.KMOD_ALT:
+                        step = PLAN_BURN_DURATION_SUPERFINE_STEP
+                    elif (event.mod & pygame.KMOD_CTRL
                             and event.mod & pygame.KMOD_SHIFT):
                         step = PLAN_BURN_DURATION_FINE_STEP
                     elif event.mod & pygame.KMOD_CTRL:
@@ -1576,56 +1612,69 @@ def main() -> None:
         # body rails stay frozen too. The render block still runs and draws
         # an alternate trajectory based on the planned burn.
         if not in_build_mode and not paused:
-            sim_time += dt
-            update_bodies(bodies, sim_time)
+            # Feed measured wall time into the accumulator (capped) and run
+            # as many fixed PHYSICS_DT ticks as fit. The predictor uses the
+            # same PHYSICS_DT, so what you see is what you fly.
+            physics_accumulator = min(physics_accumulator + frame_dt,
+                                      MAX_FRAME_DT)
+            while physics_accumulator >= PHYSICS_DT:
+                sim_time += PHYSICS_DT
+                update_bodies(bodies, sim_time)
 
-            mouse_aim_active = not build_held
-            ship.update(dt, keys, mods, deposits, bodies,
-                        mouse_pos=mouse_pos, mouse_aim_active=mouse_aim_active)
+                mouse_aim_active = not build_held
+                ship.update(PHYSICS_DT, keys, mods, deposits, bodies,
+                            mouse_pos=mouse_pos,
+                            mouse_aim_active=mouse_aim_active)
 
-            if enemies_enabled:
-                enemy_spawn_timer -= dt
-                if enemy_spawn_timer <= 0.0:
-                    # Spawn around whichever landable body the ship is
-                    # closest to, so enemies arrive where the action is.
-                    spawn_target = (nearest_landable(ship.pos, bodies)
-                                    if ship.alive else planet)
-                    if spawn_target is None:
-                        spawn_target = planet
-                    enemies.append(spawn_enemy(spawn_target))
-                    enemy_spawn_timer = ENEMY_SPAWN_INTERVAL
+                if enemies_enabled:
+                    enemy_spawn_timer -= PHYSICS_DT
+                    if enemy_spawn_timer <= 0.0:
+                        # Spawn around whichever landable body the ship is
+                        # closest to, so enemies arrive where the action is.
+                        spawn_target = (nearest_landable(ship.pos, bodies)
+                                        if ship.alive else planet)
+                        if spawn_target is None:
+                            spawn_target = planet
+                        enemies.append(spawn_enemy(spawn_target))
+                        enemy_spawn_timer = ENEMY_SPAWN_INTERVAL
 
-            ship_pos = ship.pos if ship.alive else None
-            for e in enemies:
-                if not e.alive:
-                    continue
-                e.update(dt, bodies, ship_pos)
-                if ship.alive and (e.pos - ship.pos).length() <= ENEMY_RADIUS + SHIP_LEN * 0.6:
-                    e.alive = False
-                    ship.alive = False
-
-            for t in turrets:
-                t.update(dt, enemies, bullets)
-
-            for b in bullets:
-                if not b.alive:
-                    continue
-                b.update(dt)
-                if not b.alive:
-                    continue
+                ship_pos = ship.pos if ship.alive else None
                 for e in enemies:
                     if not e.alive:
                         continue
-                    if (b.pos - e.pos).length() <= ENEMY_RADIUS + BULLET_RADIUS:
+                    e.update(PHYSICS_DT, bodies, ship_pos)
+                    if ship.alive and (e.pos - ship.pos).length() <= ENEMY_RADIUS + SHIP_LEN * 0.6:
                         e.alive = False
-                        b.alive = False
-                        ship.ore += ENEMY_KILL_REWARD
-                        kills += 1
-                        break
+                        ship.alive = False
 
-            enemies = [e for e in enemies if e.alive]
-            bullets = [b for b in bullets if b.alive]
-            turrets = [t for t in turrets if t.alive]
+                for t in turrets:
+                    t.update(PHYSICS_DT, enemies, bullets)
+
+                for b in bullets:
+                    if not b.alive:
+                        continue
+                    b.update(PHYSICS_DT)
+                    if not b.alive:
+                        continue
+                    for e in enemies:
+                        if not e.alive:
+                            continue
+                        if (b.pos - e.pos).length() <= ENEMY_RADIUS + BULLET_RADIUS:
+                            e.alive = False
+                            b.alive = False
+                            ship.ore += ENEMY_KILL_REWARD
+                            kills += 1
+                            break
+
+                enemies = [e for e in enemies if e.alive]
+                bullets = [b for b in bullets if b.alive]
+                turrets = [t for t in turrets if t.alive]
+
+                physics_accumulator -= PHYSICS_DT
+        else:
+            # Drain so that resuming from pause / build mode doesn't kick off
+            # a burst of catch-up physics ticks.
+            physics_accumulator = 0.0
 
         # Camera tracks the ship in world space; zoom is independent.
         camera.pos = Vector2(ship.pos)
