@@ -40,6 +40,9 @@ Controls:
     0                  reset zoom to 1.0
     /                  shorter trajectory prediction window (down to 5s)
     *                  longer trajectory prediction window (up to 5min)
+    F5 / F6            halve / double the predictor's step budget; coarser
+                       steps are cheaper but less faithful, finer steps cost
+                       more per frame. Current value shown on HUD.
     F10                toggle enemy spawns (also clears any in scene)
     Space              pause + plan-mode "what-if" overlay. Mouse aims a
                        burn direction; an orange ghost trajectory shows where
@@ -174,10 +177,16 @@ PREDICT_SECONDS = 30.0           # default look-ahead
 PREDICT_MIN_SECONDS = 5.0        # `/` key floor
 PREDICT_MAX_SECONDS = 1000.0     # `*` key ceiling (~16.7 minutes)
 PREDICT_STEP = 1.5               # multiplicative step per `/` or `*` press
-PREDICT_TARGET_STEPS = 12800      # cap total steps so 5min predictions stay cheap
+PREDICT_TARGET_STEPS = 6400      # cap total steps so 5min predictions stay cheap
+PREDICT_TARGET_STEPS_MIN = 100   # F5 halve floor: very coarse but legal
+PREDICT_TARGET_STEPS_MAX = 102400  # F6 double ceiling: past PHYSICS_DT clamp
 PREDICT_DRAW_STRIDE = 6
+PREDICT_TICK_INTERVAL = 5.0      # seconds between perpendicular tick marks
+PREDICT_TICK_HALFLEN = 5         # tick half-length, screen-space pixels
 PREDICT_COLOR = (90, 200, 255)
 PREDICT_IMPACT_COLOR = (255, 90, 90)
+APSIS_PERI_COLOR = (255, 130, 100)   # warm peach: closer to body
+APSIS_APO_COLOR = (140, 200, 255)    # cool blue: farther from body
 
 # --- Plan-mode (pause + what-if overlay) -----------------------------------
 # Spacebar pauses the world (bodies, ship, enemies, bullets, fuel all freeze).
@@ -406,6 +415,39 @@ def nearest_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
             best_d2 = d2
             best = b
     return best
+
+
+def find_apsides(points: list[Vector2], t_start: float, dt: float,
+                 body: Body
+                 ) -> tuple[int | None, int | None, float | None, float | None]:
+    """First periapsis and apoapsis ahead of the ship, anchored to `body`.
+
+    `points[i]` is the predicted position at t_start + i*dt; body position is
+    sampled at the matching time via `position_at` so apsides are honest in a
+    moving-body system. Returns (peri_idx, apo_idx, peri_alt, apo_alt). Any
+    field is None if not reached within the predicted window (e.g. trajectory
+    hits the body before peri, or stays nearly circular and produces no
+    detectable extremum)."""
+    n = len(points)
+    if n < 3 or dt <= 0.0:
+        return (None, None, None, None)
+    dists = [
+        (p - body.position_at(t_start + i * dt)).length()
+        for i, p in enumerate(points)
+    ]
+    peri_idx: int | None = None
+    apo_idx: int | None = None
+    for i in range(1, n - 1):
+        d_prev, d_here, d_next = dists[i - 1], dists[i], dists[i + 1]
+        if peri_idx is None and d_here < d_prev and d_here < d_next:
+            peri_idx = i
+        if apo_idx is None and d_here > d_prev and d_here > d_next:
+            apo_idx = i
+        if peri_idx is not None and apo_idx is not None:
+            break
+    peri_alt = max(0.0, dists[peri_idx] - body.radius) if peri_idx is not None else None
+    apo_alt = max(0.0, dists[apo_idx] - body.radius) if apo_idx is not None else None
+    return peri_idx, apo_idx, peri_alt, apo_alt
 
 
 # ============================================================================
@@ -948,8 +990,9 @@ class Ship:
                            seconds: float = PREDICT_SECONDS,
                            dt: float | None = None,
                            pos0: Vector2 | None = None,
-                           vel0: Vector2 | None = None
-                           ) -> tuple[list[Vector2], float | None]:
+                           vel0: Vector2 | None = None,
+                           target_steps: int = PREDICT_TARGET_STEPS
+                           ) -> tuple[list[Vector2], float | None, float]:
         # Use PHYSICS_DT so the integrator matches the live sim step-for-step
         # over short/medium horizons -- the predicted ghost is then bit-
         # equivalent to what the live integrator will fly. Only coarsen for
@@ -962,7 +1005,7 @@ class Ship:
         # pos0/vel0 override the ship's current state -- used by plan-mode
         # to predict from a hypothetical post-burn velocity.
         if dt is None:
-            dt = max(PHYSICS_DT, seconds / PREDICT_TARGET_STEPS)
+            dt = max(PHYSICS_DT, seconds / target_steps)
         n = max(2, int(seconds / dt))
         pos = Vector2(pos0) if pos0 is not None else Vector2(self.pos)
         vel = Vector2(vel0) if vel0 is not None else Vector2(self.vel)
@@ -991,7 +1034,7 @@ class Ship:
                     break
             if hit:
                 break
-        return points, impact_speed
+        return points, impact_speed, dt
 
     def draw(self, surf: pygame.Surface, camera: Camera) -> None:
         if not self.alive:
@@ -1226,7 +1269,69 @@ def _ghost_thickness(t: float) -> int:
     return 1 + int(t * 2)
 
 
-def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2], impact_speed: float | None) -> None:
+def draw_apsis_markers(surf: pygame.Surface, camera: Camera,
+                       points: list[Vector2],
+                       peri_idx: int | None, apo_idx: int | None) -> None:
+    """Two small ringed dots: peach for periapsis, blue for apoapsis. Same
+    visual grammar as the impact end-marker (5 px outline + 2 px filled core)
+    so the eye reads them as 'predictor annotations' rather than world objects."""
+    n = len(points)
+    if peri_idx is not None and 0 <= peri_idx < n:
+        sp = camera.world_to_screen_int(points[peri_idx])
+        pygame.draw.circle(surf, APSIS_PERI_COLOR, sp, 5, 1)
+        pygame.draw.circle(surf, APSIS_PERI_COLOR, sp, 2)
+    if apo_idx is not None and 0 <= apo_idx < n:
+        sp = camera.world_to_screen_int(points[apo_idx])
+        pygame.draw.circle(surf, APSIS_APO_COLOR, sp, 5, 1)
+        pygame.draw.circle(surf, APSIS_APO_COLOR, sp, 2)
+
+
+def _draw_trajectory_ticks(surf: pygame.Surface, camera: Camera,
+                           points: list[Vector2], dt: float,
+                           base_color: tuple[int, int, int]) -> None:
+    """Perpendicular tick marks at every PREDICT_TICK_INTERVAL seconds along
+    the trajectory. Tick length is screen-space (zoom-invariant); color and
+    thickness fade with the ribbon so distant ticks dim out alongside the
+    line."""
+    n = len(points)
+    if n < 3 or dt <= 0.0:
+        return
+    samples_per_tick = PREDICT_TICK_INTERVAL / dt
+    if samples_per_tick < 1.0:
+        return
+    bg_r, bg_g, bg_b = BG
+    base_r, base_g, base_b = base_color
+    k = 1
+    while True:
+        i = int(round(samples_per_tick * k))
+        if i >= n - 1:
+            break
+        # Screen-space tangent, so tick length is constant in pixels.
+        ax, ay = camera.world_to_screen(points[max(0, i - 1)])
+        bx, by = camera.world_to_screen(points[min(n - 1, i + 1)])
+        dxs, dys = bx - ax, by - ay
+        mag = math.hypot(dxs, dys)
+        if mag < 1e-6:
+            k += 1
+            continue
+        # 90° rotation gives the perpendicular.
+        px, py = -dys / mag, dxs / mag
+        cx, cy = camera.world_to_screen(points[i])
+        t = i / (n - 1)
+        r = int(base_r * (1 - t) + bg_r * t)
+        g = int(base_g * (1 - t) + bg_g * t)
+        b_ch = int(base_b * (1 - t) + bg_b * t)
+        thickness = _ghost_thickness(t)
+        x0 = int(cx + px * PREDICT_TICK_HALFLEN)
+        y0 = int(cy + py * PREDICT_TICK_HALFLEN)
+        x1 = int(cx - px * PREDICT_TICK_HALFLEN)
+        y1 = int(cy - py * PREDICT_TICK_HALFLEN)
+        pygame.draw.line(surf, (r, g, b_ch), (x0, y0), (x1, y1), thickness)
+        k += 1
+
+
+def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
+                    impact_speed: float | None, dt: float) -> None:
     if len(points) < 2:
         return
     n = len(points)
@@ -1247,6 +1352,8 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
             last_t = t
         last_screen = sp
 
+    _draw_trajectory_ticks(surf, camera, points, dt, PREDICT_COLOR)
+
     if impact_speed is not None:
         ip = camera.world_to_screen_int(points[-1])
         color = LANDED_RING_COLOR if impact_speed <= LAND_SPEED_MAX else PREDICT_IMPACT_COLOR
@@ -1256,7 +1363,8 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
 
 def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
                          points: list[Vector2],
-                         impact_speed: float | None) -> None:
+                         impact_speed: float | None,
+                         dt: float) -> None:
     """Plan-mode counterpart to draw_trajectory: orange ribbon, same fade/stride.
 
     Drawn separately rather than parameterised onto draw_trajectory because the
@@ -1281,6 +1389,8 @@ def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
                              _ghost_thickness(0.5 * (last_t + t)))
             last_t = t
         last_screen = sp
+
+    _draw_trajectory_ticks(surf, camera, points, dt, PLAN_COLOR)
 
     if impact_speed is not None:
         ip = camera.world_to_screen_int(points[-1])
@@ -1312,13 +1422,22 @@ def draw_fuel_bar(surf: pygame.Surface, x: int, y: int, w: int, h: int,
         pygame.draw.rect(surf, fill_color, (x + 1, y + 1, fill_w, h - 2))
 
 
+def _fmt_apsis(alt: float | None) -> str:
+    return f"{alt:7.1f}" if alt is not None else "    ---"
+
+
 def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              bodies: list[Body], sun: Body,
              enemies: list[Enemy], turrets: list[Turret], build_prompt: bool,
              zoom: float, predict_seconds: float,
              kills: int, enemies_enabled: bool,
              paused: bool = False, plan_burn_duration: float = 0.0,
-             plan_burn_dv: float = 0.0) -> None:
+             plan_burn_dv: float = 0.0,
+             predict_target_steps: int = PREDICT_TARGET_STEPS,
+             live_peri_alt: float | None = None,
+             live_apo_alt: float | None = None,
+             plan_peri_alt: float | None = None,
+             plan_apo_alt: float | None = None) -> None:
     if ship.alive:
         # Anchor altitude / rel-speed / v_circ to whichever landable body is
         # currently closest. As the player approaches Ember, the HUD silently
@@ -1357,7 +1476,10 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             f"Ore:         {ship.ore:6.1f}",
             f"Turrets:     {live_turrets}    Enemies: {live_enemies}{'' if enemies_enabled else ' (off)'}",
             f"Kills:       {kills}",
-            f"Zoom:        x{zoom:.2f}    Predict: {predict_seconds:.0f}s",
+            f"Zoom:        x{zoom:.2f}    Predict: {predict_seconds:.0f}s "
+            f"({predict_target_steps} steps)",
+            f"Peri / Apo:  {_fmt_apsis(live_peri_alt)} / {_fmt_apsis(live_apo_alt)}"
+            f"    (vs {body_label})",
         ]
         if thrust_label:
             lines.append(thrust_label)
@@ -1386,12 +1508,14 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             lines.append("")
             lines.append(f"PLAN MODE  (paused)   burn {plan_burn_duration:.3f}s "
                          f"= dv {plan_burn_dv:.1f}")
+            lines.append(f"  planned peri/apo: {_fmt_apsis(plan_peri_alt)} / "
+                         f"{_fmt_apsis(plan_apo_alt)}")
             lines.append("  mouse aims burn   [ / ] duration  (Ctrl=0.01s, Ctrl+Shift=0.001s, Alt=0.0001s)")
             lines.append("  Enter commit burn   Space resume without burning")
         lines += [
             "",
             "Mouse aim  W/S/Shift/Ctrl thrust  H brake  B build",
-            "+/- zoom  0 reset zoom  / shorter * longer predict",
+            "+/- zoom  0 reset zoom  / shorter * longer predict  F5/F6 halve/double steps",
             "Space pause+plan   [ ] burn duration",
             "F11 fullscreen  R reset world  Esc quit",
         ]
@@ -1499,6 +1623,7 @@ def main() -> None:
 
     fullscreen = False
     predict_seconds = PREDICT_SECONDS
+    predict_target_steps = PREDICT_TARGET_STEPS
 
     paused = False
     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
@@ -1572,6 +1697,14 @@ def main() -> None:
                                        math.sin(burn_angle))
                     if ship.commit_planned_burn(burn_dir, plan_burn_duration):
                         paused = False
+                elif event.key == pygame.K_F5:
+                    predict_target_steps = max(
+                        PREDICT_TARGET_STEPS_MIN, predict_target_steps // 2
+                    )
+                elif event.key == pygame.K_F6:
+                    predict_target_steps = min(
+                        PREDICT_TARGET_STEPS_MAX, predict_target_steps * 2
+                    )
                 elif event.key == pygame.K_F10:
                     enemies_enabled = not enemies_enabled
                     if not enemies_enabled:
@@ -1696,11 +1829,25 @@ def main() -> None:
         for body in bodies:
             draw_orbit_path(screen, camera, body)
 
+        # Anchor for apsides: whatever landable body the ship is closest to
+        # right now. Stays consistent with the HUD's "vs <body>" labelling.
+        apsis_anchor = nearest_landable(ship.pos, bodies) if ship.alive else None
+        live_peri_alt: float | None = None
+        live_apo_alt: float | None = None
+        plan_peri_alt: float | None = None
+        plan_apo_alt: float | None = None
+
         if ship.alive and not ship.landed and not in_build_mode:
-            traj, impact_speed = ship.predict_trajectory(
-                bodies, sim_time, seconds=predict_seconds
+            traj, impact_speed, traj_dt = ship.predict_trajectory(
+                bodies, sim_time, seconds=predict_seconds,
+                target_steps=predict_target_steps,
             )
-            draw_trajectory(screen, camera, traj, impact_speed)
+            draw_trajectory(screen, camera, traj, impact_speed, traj_dt)
+            if apsis_anchor is not None:
+                peri_idx, apo_idx, live_peri_alt, live_apo_alt = find_apsides(
+                    traj, sim_time, traj_dt, apsis_anchor
+                )
+                draw_apsis_markers(screen, camera, traj, peri_idx, apo_idx)
 
         # Plan-mode "what-if" overlay: same predictor, but with an instantaneous
         # delta-v added to the ship's current velocity in the mouse-aimed direction.
@@ -1727,11 +1874,17 @@ def main() -> None:
             else:
                 plan_pos0 = None  # falls back to ship.pos
                 plan_vel0 = ship.vel + burn_dir * plan_burn_dv
-            plan_traj, plan_impact = ship.predict_trajectory(
+            plan_traj, plan_impact, plan_dt = ship.predict_trajectory(
                 bodies, sim_time, seconds=predict_seconds,
                 pos0=plan_pos0, vel0=plan_vel0,
+                target_steps=predict_target_steps,
             )
-            draw_plan_trajectory(screen, camera, plan_traj, plan_impact)
+            draw_plan_trajectory(screen, camera, plan_traj, plan_impact, plan_dt)
+            if apsis_anchor is not None:
+                p_peri_idx, p_apo_idx, plan_peri_alt, plan_apo_alt = find_apsides(
+                    plan_traj, sim_time, plan_dt, apsis_anchor
+                )
+                draw_apsis_markers(screen, camera, plan_traj, p_peri_idx, p_apo_idx)
             # Burn-vector arrow anchored where the burn actually starts (so
             # when landed it sits at launch-pad height, not on the surface).
             arrow_origin = plan_pos0 if plan_pos0 is not None else ship.pos
@@ -1768,7 +1921,10 @@ def main() -> None:
                  build_prompt, camera.zoom, predict_seconds,
                  kills, enemies_enabled,
                  paused=paused, plan_burn_duration=plan_burn_duration,
-                 plan_burn_dv=plan_burn_dv)
+                 plan_burn_dv=plan_burn_dv,
+                 predict_target_steps=predict_target_steps,
+                 live_peri_alt=live_peri_alt, live_apo_alt=live_apo_alt,
+                 plan_peri_alt=plan_peri_alt, plan_apo_alt=plan_apo_alt)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)
