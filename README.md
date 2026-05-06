@@ -32,8 +32,9 @@ See the docstring at the top of `ypilot.py` for the full list. Briefly:
 - **B (hold)** opens the build menu when landed near an unoccupied build pad
 - **+ / -** zoom in/out; **0** resets zoom
 - **/ *** shorten/lengthen the trajectory prediction window
+- **F5 / F6** halve / double the predictor's per-frame step budget (current value shown on the HUD next to the predict window). Coarser = cheaper but less faithful; finer = more accurate but more per-frame work
 - **Space** pause + plan-mode "what-if" overlay: mouse aims a burn direction, an orange ghost trajectory shows where the ship would end up if it received an instantaneous delta-v in that direction. Bodies, ship, enemies, fuel all freeze. Use it to plan Hohmann transfers or surface-skim approaches before committing. Press Space again to resume without burning.
-- **[ / ]** (paused only) shorten / lengthen the planned burn duration in 0.1s steps. **Ctrl + [ / ]** = 0.01s precision step, **Ctrl+Shift + [ / ]** = 0.001s extra-fine step (mirrors the thrust trim ladder — for trimming Hohmann burns to milliseconds)
+- **[ / ]** (paused only) shorten / lengthen the planned burn duration in 0.1s steps. **Ctrl + [ / ]** = 0.01s precision step, **Ctrl+Shift + [ / ]** = 0.001s extra-fine step (mirrors the thrust trim ladder — for trimming Hohmann burns to milliseconds). Duration is signed: stepping past 0 into negatives previews a retro burn from the same aim point — A/B forward vs. reverse without spinning the mouse 180°
 - **Enter** (paused only) commit the planned burn: apply the impulse the orange trajectory shows and unpause. Lifts off automatically if landed.
 - **F11** toggle fullscreen
 - **R** reset world; **Esc** quit
@@ -52,12 +53,60 @@ Single-file Python, ~1290 lines. Key design choices:
   closed.
 - **Trajectory predictor**: calls `body.position_at(t)` per prediction step
   so it accounts for body motion during prediction. Variable dt scales with
-  window length so cost stays bounded.
+  window length so cost stays bounded. The line is annotated with several
+  glyphs (5s tick marks, peri/apo dots, prograde arrows, closest-approach
+  diamond, SOI crossings, impact dot) so the player can read orbital
+  geometry off the line directly — see "Reading the trajectory" below.
 - **Camera**: a `Camera` class with `pos` and `zoom` plus `world_to_screen`.
   HUD renders at native screen pixels; world objects scale.
 - **Combat**: enemies and bullets travel in straight lines (no gravity, kept
   predictable). Turrets lead targets with single-pass intercept solution,
   add random ±5% aim noise per frame for the "dumb turret" feel.
+
+## Reading the trajectory
+
+The cyan line ahead of the ship (orange while paused in plan-mode) is the
+predictor's best guess at the ship's future path. Several markers turn it
+into a navigation instrument rather than just a pretty line:
+
+- **Perpendicular tick marks** every 5 seconds. Use them to read off "where
+  will I be in 10 / 15 / 20 s". Closer-spaced ticks = slower; widely-spaced
+  ticks = faster. Ticks fade with the line so distant ones honor the same
+  uncertainty cone.
+- **Peach dot — periapsis (peri)**: the predicted closest point of your
+  orbit to the body you're nearest. This is where you're moving *fastest*.
+- **Cool-blue dot — apoapsis (apo)**: the farthest point. This is where
+  you're moving *slowest*. Near-circular orbits have peri ≈ apo (and the
+  HUD shows both).
+- **Small arrow attached to each apsis dot**: the prograde direction —
+  i.e. which way you're moving as you pass through that apsis. To make
+  the orbit *less* eccentric, burn prograde (with the arrow) at apo;
+  burn retrograde (against the arrow) at peri. Reverse to make it more
+  eccentric. Bonus: tangential burns at apsides are the most efficient
+  way to reshape an orbit, because all your delta-v goes into reshaping
+  rather than rotating.
+- **Magenta diamond — closest pass to the *other* landable body**: e.g.,
+  if you're orbiting Planet, this is where you'd get nearest Ember in
+  the predicted window. To set up a Hohmann transfer, burn prograde at
+  apo (or peri, if your peri is on the right side) and watch the diamond
+  slide toward Ember on the orange ghost.
+- **Gold ring — sphere-of-influence (SOI) crossing**: where the
+  gravitationally-dominant body changes along your path (e.g., you cross
+  out of the planet's Hill sphere into the sun's domain). Inside one
+  body's SOI, you can think of your orbit as essentially a 2-body
+  ellipse around it; outside, the other body takes over. These rings
+  mark the hand-off points.
+- **Impact dot at the line's end** (green = soft, red = hard): if your
+  trajectory hits something within the prediction window, this is where
+  and how. Soft = within `LAND_SPEED_MAX` (35 px/s) relative to the body.
+- **Line fade and thickening**: the chaos cone. Even with bit-faithful
+  integration, a 3-body trajectory's true position diverges exponentially
+  with horizon. The line fades toward background and thickens to keep
+  you honest about how far ahead is "trustworthy."
+
+The plan-mode (orange) line gets the same annotations, so trimming a
+Hohmann is "step `]` until the orange diamond touches Ember" rather
+than mental arithmetic.
 
 ## Notable design choices
 
@@ -205,14 +254,18 @@ Returns `Vector2(0,0)` when off. When on:
 
 ### Trajectory predictor
 
-Adaptive dt: `dt = max(PREDICT_DT_MIN, seconds / PREDICT_TARGET_STEPS)`. With
-current settings (`MAX=1000s`, `TARGET=6400`), full native fidelity
-(`dt=1/60`) up to ~107s of look-ahead, then coarsens linearly. Bodies queried
-via `body.position_at(t)` (closed-form Keplerian; doesn't share state with
-the live sim, so prediction can run safely without disturbing simulation
-state). Predictions are mathematically real but informationally fictional
-past 2-3 planetary periods (~150s) due to chaos in the reduced 3-body
-problem.
+Adaptive dt: `dt = max(PHYSICS_DT, seconds / target_steps)`, where
+`target_steps` is the runtime budget (default 6400, halved/doubled by F5/F6,
+clamped to [100, 102400]). With defaults (`MAX_SECONDS=1000`,
+`target_steps=6400`), full native fidelity (`dt=1/60`) up to ~107 s of
+look-ahead, then coarsens linearly. Bodies queried via `body.position_at(t)`
+(closed-form Keplerian; doesn't share state with the live sim, so prediction
+can run safely without disturbing simulation state). The predictor returns
+`(points, impact_speed, dt)` so the drawer can place the 5 s tick marks at
+exact-time indices regardless of horizon. Predictions are mathematically
+real but informationally fictional past 2-3 planetary periods (~150 s) due
+to chaos in the reduced 3-body problem; the chaos cone (fade + thickening
+ribbon) makes that visible.
 
 ### Tunable constants (current values)
 
@@ -235,7 +288,11 @@ problem.
 | `SUN_MU` | 8e6 | Sun's gravitational parameter |
 | `PLANET_ORBIT_RADIUS` | 800 | Planet-sun distance |
 | `PREDICT_MAX_SECONDS` | 1000 | Predictor look-ahead ceiling (~16.7 min) |
-| `PREDICT_TARGET_STEPS` | 6400 | Predictor step-cap (worst-case per-frame work) |
+| `PREDICT_TARGET_STEPS` | 6400 | Predictor step-cap default (F5/F6 mutate at runtime) |
+| `PREDICT_TARGET_STEPS_MIN` | 100 | F5 floor — coarse but legal |
+| `PREDICT_TARGET_STEPS_MAX` | 102400 | F6 ceiling — past PHYSICS_DT clamp |
+| `PREDICT_TICK_INTERVAL` | 5.0 | Seconds between perpendicular tick marks on the trajectory |
+| `PREDICT_TICK_HALFLEN` | 5 | Tick half-length, screen-space pixels (zoom-invariant) |
 
 Derived: planet orbital speed ≈ 100 px/s; orbital period ≈ 50 s; Hill sphere
 radius ≈ 441 px.
@@ -291,9 +348,23 @@ is better than relying on the cancel ordering.
   other)
 - Landed: green ring around ship
 - Brake-assist on: cyan ring around ship
-- Trajectory line: blue → fading-to-background gradient with stride 6
+- Trajectory line: blue → fading-to-background gradient with stride 6;
+  thickness ramps 1→3 px with horizon as a "chaos cone" cue
+- Trajectory tick marks: perpendicular line every 5 s, screen-space length
+  so they stay constant pixels at any zoom
 - Trajectory impact marker: green dot if soft (within `LAND_SPEED_MAX`),
   red dot if hard
+- Periapsis: peach ringed dot (5 px outline + 2 px filled core) plus a
+  small prograde arrow attached
+- Apoapsis: cool blue ringed dot, same shape as peri, also with a prograde
+  arrow attached
+- Closest pass to non-anchor landable body: magenta diamond outline
+  (distinct shape so it doesn't compete with the round peri/apo dots)
+- SOI crossing (dominant gravity hand-off): small gold outlined ring,
+  smaller than the apsis dots
+- Plan-mode (paused) "what-if" trajectory: orange variant of the cyan
+  line, with all the same markers in their normal colors so the player
+  can compare live-vs-planned at a glance
 
 ### Working with the project author
 

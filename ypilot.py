@@ -187,6 +187,8 @@ PREDICT_COLOR = (90, 200, 255)
 PREDICT_IMPACT_COLOR = (255, 90, 90)
 APSIS_PERI_COLOR = (255, 130, 100)   # warm peach: closer to body
 APSIS_APO_COLOR = (140, 200, 255)    # cool blue: farther from body
+CLOSEST_APPROACH_COLOR = (210, 130, 240)  # magenta diamond: nearest pass to non-anchor body
+SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 
 # --- Plan-mode (pause + what-if overlay) -----------------------------------
 # Spacebar pauses the world (bodies, ship, enemies, bullets, fuel all freeze).
@@ -448,6 +450,67 @@ def find_apsides(points: list[Vector2], t_start: float, dt: float,
     peri_alt = max(0.0, dists[peri_idx] - body.radius) if peri_idx is not None else None
     apo_alt = max(0.0, dists[apo_idx] - body.radius) if apo_idx is not None else None
     return peri_idx, apo_idx, peri_alt, apo_alt
+
+
+def find_closest_approach(points: list[Vector2], t_start: float, dt: float,
+                          body: Body
+                          ) -> tuple[int | None, float | None]:
+    """Index and altitude of the predicted point at which the ship gets
+    nearest to `body`, sampling body position at the matching time.
+
+    Used to mark closest-pass to a *different* landable body than the orbit
+    anchor -- e.g., when orbiting Planet, this is where the trajectory grazes
+    nearest Ember. The marker is meaningful even when the ship isn't on a
+    transfer (it's just 'the closest you got within the predicted horizon')."""
+    n = len(points)
+    if n < 1 or dt <= 0.0:
+        return (None, None)
+    best_idx = 0
+    best_d = float("inf")
+    for i, p in enumerate(points):
+        d = (p - body.position_at(t_start + i * dt)).length()
+        if d < best_d:
+            best_d = d
+            best_idx = i
+    if best_d == float("inf"):
+        return (None, None)
+    alt = max(0.0, best_d - body.radius)
+    return best_idx, alt
+
+
+def find_soi_crossings(points: list[Vector2], t_start: float, dt: float,
+                       bodies: list[Body]) -> list[int]:
+    """Indices where the gravitationally dominant body changes along the
+    predicted trajectory. Marks Hill-sphere / sphere-of-influence boundaries
+    -- the line between 'in planet's gravity well' and 'in sun's gravity
+    well', which is intentionally *just outside* the default orbit at 370 px
+    (planet's Hill sphere is ~441 px). Crossings tend to be where orbits
+    visibly precess or transfer hand-offs happen."""
+    n = len(points)
+    if n < 2 or dt <= 0.0 or not bodies:
+        return []
+
+    def dominant(p: Vector2, t: float) -> int:
+        best_g = 0.0
+        best_idx = -1
+        for bi, b in enumerate(bodies):
+            d2 = (p - b.position_at(t)).length_squared()
+            if d2 < 1e-3:
+                continue
+            g = b.mu / d2
+            if g > best_g:
+                best_g = g
+                best_idx = bi
+        return best_idx
+
+    crossings: list[int] = []
+    prev = dominant(points[0], t_start)
+    for i in range(1, n):
+        cur = dominant(points[i], t_start + i * dt)
+        if cur != prev and cur != -1 and prev != -1:
+            crossings.append(i)
+        prev = cur
+    return crossings
 
 
 # ============================================================================
@@ -1269,21 +1332,83 @@ def _ghost_thickness(t: float) -> int:
     return 1 + int(t * 2)
 
 
+def _draw_prograde_arrow(surf: pygame.Surface, camera: Camera,
+                         points: list[Vector2], idx: int,
+                         color: tuple[int, int, int]) -> None:
+    """Tiny arrow at points[idx] pointing in the local prograde (motion)
+    direction. Tangent computed in screen space so arrow length is constant
+    in pixels regardless of zoom. Anchored a few pixels off the apsis dot
+    so the dot stays visible."""
+    n = len(points)
+    if not (0 < idx < n - 1):
+        return
+    ax, ay = camera.world_to_screen(points[idx - 1])
+    bx, by = camera.world_to_screen(points[idx + 1])
+    dxs, dys = bx - ax, by - ay
+    mag = math.hypot(dxs, dys)
+    if mag < 1e-6:
+        return
+    fx, fy = dxs / mag, dys / mag
+    cx, cy = camera.world_to_screen(points[idx])
+    shaft_start = (cx + fx * 6, cy + fy * 6)
+    shaft_end = (cx + fx * 14, cy + fy * 14)
+    pygame.draw.line(surf, color, shaft_start, shaft_end, 2)
+    tipx, tipy = shaft_end
+    perpx, perpy = -fy, fx
+    head_back = 4
+    head_side = 3
+    pygame.draw.polygon(surf, color, [
+        (tipx, tipy),
+        (tipx - fx * head_back + perpx * head_side,
+         tipy - fy * head_back + perpy * head_side),
+        (tipx - fx * head_back - perpx * head_side,
+         tipy - fy * head_back - perpy * head_side),
+    ])
+
+
 def draw_apsis_markers(surf: pygame.Surface, camera: Camera,
                        points: list[Vector2],
                        peri_idx: int | None, apo_idx: int | None) -> None:
-    """Two small ringed dots: peach for periapsis, blue for apoapsis. Same
-    visual grammar as the impact end-marker (5 px outline + 2 px filled core)
-    so the eye reads them as 'predictor annotations' rather than world objects."""
+    """Two small ringed dots (peach peri, blue apo) plus a prograde arrow at
+    each, pointing in the direction of motion -- the burn axis for raising
+    the *opposite* apsis. Same visual grammar as the impact end-marker (5 px
+    outline + 2 px filled core) so the eye reads markers as 'predictor
+    annotations' rather than world objects."""
     n = len(points)
     if peri_idx is not None and 0 <= peri_idx < n:
         sp = camera.world_to_screen_int(points[peri_idx])
         pygame.draw.circle(surf, APSIS_PERI_COLOR, sp, 5, 1)
         pygame.draw.circle(surf, APSIS_PERI_COLOR, sp, 2)
+        _draw_prograde_arrow(surf, camera, points, peri_idx, APSIS_PERI_COLOR)
     if apo_idx is not None and 0 <= apo_idx < n:
         sp = camera.world_to_screen_int(points[apo_idx])
         pygame.draw.circle(surf, APSIS_APO_COLOR, sp, 5, 1)
         pygame.draw.circle(surf, APSIS_APO_COLOR, sp, 2)
+        _draw_prograde_arrow(surf, camera, points, apo_idx, APSIS_APO_COLOR)
+
+
+def draw_closest_approach_marker(surf: pygame.Surface, camera: Camera,
+                                 points: list[Vector2],
+                                 idx: int | None) -> None:
+    """Magenta diamond at the predicted closest-approach point to a
+    non-anchor body. Diamond shape distinguishes it from the round
+    peri/apo dots."""
+    if idx is None or not (0 <= idx < len(points)):
+        return
+    cx, cy = camera.world_to_screen_int(points[idx])
+    s = 5
+    diamond = [(cx, cy - s), (cx + s, cy), (cx, cy + s), (cx - s, cy)]
+    pygame.draw.polygon(surf, CLOSEST_APPROACH_COLOR, diamond, 1)
+
+
+def draw_soi_markers(surf: pygame.Surface, camera: Camera,
+                     points: list[Vector2], indices: list[int]) -> None:
+    """Small gold rings where the dominant gravity source flips. Drawn
+    smaller than apsis markers so they don't compete visually."""
+    for i in indices:
+        if 0 <= i < len(points):
+            sp = camera.world_to_screen_int(points[i])
+            pygame.draw.circle(surf, SOI_CROSSING_COLOR, sp, 4, 1)
 
 
 def _draw_trajectory_ticks(surf: pygame.Surface, camera: Camera,
@@ -1437,7 +1562,10 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              live_peri_alt: float | None = None,
              live_apo_alt: float | None = None,
              plan_peri_alt: float | None = None,
-             plan_apo_alt: float | None = None) -> None:
+             plan_apo_alt: float | None = None,
+             ca_target_name: str | None = None,
+             live_ca_alt: float | None = None,
+             plan_ca_alt: float | None = None) -> None:
     if ship.alive:
         # Anchor altitude / rel-speed / v_circ to whichever landable body is
         # currently closest. As the player approaches Ember, the HUD silently
@@ -1481,6 +1609,9 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             f"Peri / Apo:  {_fmt_apsis(live_peri_alt)} / {_fmt_apsis(live_apo_alt)}"
             f"    (vs {body_label})",
         ]
+        if ca_target_name is not None and live_ca_alt is not None:
+            lines.append(f"Closest pass:{_fmt_apsis(live_ca_alt)}    "
+                         f"(vs {ca_target_name})")
         if thrust_label:
             lines.append(thrust_label)
         if ship.retro_thrusting:
@@ -1510,6 +1641,9 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
                          f"= dv {plan_burn_dv:.1f}")
             lines.append(f"  planned peri/apo: {_fmt_apsis(plan_peri_alt)} / "
                          f"{_fmt_apsis(plan_apo_alt)}")
+            if ca_target_name is not None and plan_ca_alt is not None:
+                lines.append(f"  planned closest pass:{_fmt_apsis(plan_ca_alt)}"
+                             f"    (vs {ca_target_name})")
             lines.append("  mouse aims burn   [ / ] duration  (Ctrl=0.01s, Ctrl+Shift=0.001s, Alt=0.0001s)")
             lines.append("  Enter commit burn   Space resume without burning")
         lines += [
@@ -1832,10 +1966,21 @@ def main() -> None:
         # Anchor for apsides: whatever landable body the ship is closest to
         # right now. Stays consistent with the HUD's "vs <body>" labelling.
         apsis_anchor = nearest_landable(ship.pos, bodies) if ship.alive else None
+        # Pick the closest-approach target: the *other* landable body (if any),
+        # so when orbiting Planet you see your nearest pass to Ember and vice
+        # versa. With YPilot's two-planet world this is unambiguous.
+        ca_target: Body | None = None
+        if apsis_anchor is not None:
+            for b in bodies:
+                if b.landable and b is not apsis_anchor:
+                    ca_target = b
+                    break
         live_peri_alt: float | None = None
         live_apo_alt: float | None = None
+        live_ca_alt: float | None = None
         plan_peri_alt: float | None = None
         plan_apo_alt: float | None = None
+        plan_ca_alt: float | None = None
 
         if ship.alive and not ship.landed and not in_build_mode:
             traj, impact_speed, traj_dt = ship.predict_trajectory(
@@ -1843,6 +1988,15 @@ def main() -> None:
                 target_steps=predict_target_steps,
             )
             draw_trajectory(screen, camera, traj, impact_speed, traj_dt)
+            # Stack annotation layers under-to-over so the most actionable
+            # markers (apsides + prograde arrows) sit on top.
+            soi_indices = find_soi_crossings(traj, sim_time, traj_dt, bodies)
+            draw_soi_markers(screen, camera, traj, soi_indices)
+            if ca_target is not None:
+                ca_idx, live_ca_alt = find_closest_approach(
+                    traj, sim_time, traj_dt, ca_target
+                )
+                draw_closest_approach_marker(screen, camera, traj, ca_idx)
             if apsis_anchor is not None:
                 peri_idx, apo_idx, live_peri_alt, live_apo_alt = find_apsides(
                     traj, sim_time, traj_dt, apsis_anchor
@@ -1880,6 +2034,13 @@ def main() -> None:
                 target_steps=predict_target_steps,
             )
             draw_plan_trajectory(screen, camera, plan_traj, plan_impact, plan_dt)
+            plan_soi_indices = find_soi_crossings(plan_traj, sim_time, plan_dt, bodies)
+            draw_soi_markers(screen, camera, plan_traj, plan_soi_indices)
+            if ca_target is not None:
+                p_ca_idx, plan_ca_alt = find_closest_approach(
+                    plan_traj, sim_time, plan_dt, ca_target
+                )
+                draw_closest_approach_marker(screen, camera, plan_traj, p_ca_idx)
             if apsis_anchor is not None:
                 p_peri_idx, p_apo_idx, plan_peri_alt, plan_apo_alt = find_apsides(
                     plan_traj, sim_time, plan_dt, apsis_anchor
@@ -1924,7 +2085,9 @@ def main() -> None:
                  plan_burn_dv=plan_burn_dv,
                  predict_target_steps=predict_target_steps,
                  live_peri_alt=live_peri_alt, live_apo_alt=live_apo_alt,
-                 plan_peri_alt=plan_peri_alt, plan_apo_alt=plan_apo_alt)
+                 plan_peri_alt=plan_peri_alt, plan_apo_alt=plan_apo_alt,
+                 ca_target_name=ca_target.name if ca_target is not None else None,
+                 live_ca_alt=live_ca_alt, plan_ca_alt=plan_ca_alt)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)
