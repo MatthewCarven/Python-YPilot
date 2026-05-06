@@ -124,6 +124,28 @@ PLANET2_RIM = (140, 60, 40)
 PLANET2_ORBIT_RADIUS = 1800.0
 PLANET2_INITIAL_PHASE = math.pi * 0.6
 
+# --- Moon (orbiting Planet) -------------------------------------------------
+# Hierarchical orbit: parented to Planet (which itself orbits the Sun).
+# Body.position_at recurses through parent so this composes Sun+Planet+Moon
+# offsets analytically and gravity_at_t sees a moving moon at the right place.
+#
+# Sized to sit well inside Planet's Hill sphere (~441px). At r=250 around
+# Planet (mu=4e6) the period is T = 2*pi*sqrt(r^3/mu_p) =~ 12.4s and the
+# circular orbit speed v = sqrt(mu_p/r) =~ 126.5 px/s. The default player
+# orbit at 370px around Planet sits at ~104 px/s, T ~22s -- so the moon
+# laps you. Chasing it requires real interception planning, not just turning.
+#
+# Moon's own Hill sphere is r_hill = a*(mu_m/(3*mu_p))^(1/3) =~ 64px so
+# above the moon's surface there's only ~39px before Planet's gravity
+# overpowers Moon's. Landings are tight; come in slow.
+MOON_NAME = "Moon"
+MOON_RADIUS = 25.0
+MOON_MU = 200_000.0
+MOON_COLOR = (180, 175, 170)
+MOON_RIM = (120, 115, 110)
+MOON_ORBIT_RADIUS = 250.0
+MOON_INITIAL_PHASE = math.pi * 0.5
+
 # --- Ship -------------------------------------------------------------------
 SHIP_THRUST = 220.0
 SHIP_TURN_RATE = math.radians(180)
@@ -352,13 +374,22 @@ def make_solar_system() -> list[Body]:
         parent=sun, orbit_radius=PLANET_ORBIT_RADIUS,
         phase=PLANET_INITIAL_PHASE, landable=True,
     )
+    moon = Body(
+        MOON_NAME, radius=MOON_RADIUS, mu=MOON_MU,
+        color=MOON_COLOR, rim=MOON_RIM,
+        parent=planet, orbit_radius=MOON_ORBIT_RADIUS,
+        phase=MOON_INITIAL_PHASE, landable=True,
+    )
     ember = Body(
         PLANET2_NAME, radius=PLANET2_RADIUS, mu=PLANET2_MU,
         color=PLANET2_COLOR, rim=PLANET2_RIM,
         parent=sun, orbit_radius=PLANET2_ORBIT_RADIUS,
         phase=PLANET2_INITIAL_PHASE, landable=True,
     )
-    return [sun, planet, ember]
+    # Order matters for update_bodies(): a child body's update_at reads its
+    # parent's current pos/vel, so Sun -> Planet -> Moon -> Ember keeps the
+    # chain consistent within a single physics step.
+    return [sun, planet, moon, ember]
 
 
 def update_bodies(bodies: list[Body], t: float) -> None:
@@ -1966,15 +1997,22 @@ def main() -> None:
         # Anchor for apsides: whatever landable body the ship is closest to
         # right now. Stays consistent with the HUD's "vs <body>" labelling.
         apsis_anchor = nearest_landable(ship.pos, bodies) if ship.alive else None
-        # Pick the closest-approach target: the *other* landable body (if any),
-        # so when orbiting Planet you see your nearest pass to Ember and vice
-        # versa. With YPilot's two-planet world this is unambiguous.
+        # Closest-approach target: the *nearest* landable body that isn't the
+        # apsis anchor. With three landable bodies (Planet, Moon, Ember) this
+        # picks the most useful "next destination" -- near Planet you see
+        # your closest pass to Moon, near Moon you see Planet, near Ember
+        # you see Planet. Falls back to None when the only landable body in
+        # scene is the anchor itself.
         ca_target: Body | None = None
         if apsis_anchor is not None:
+            best_d2 = float("inf")
             for b in bodies:
-                if b.landable and b is not apsis_anchor:
+                if not b.landable or b is apsis_anchor:
+                    continue
+                d2 = (b.pos - ship.pos).length_squared()
+                if d2 < best_d2:
+                    best_d2 = d2
                     ca_target = b
-                    break
         live_peri_alt: float | None = None
         live_apo_alt: float | None = None
         live_ca_alt: float | None = None

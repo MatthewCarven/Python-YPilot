@@ -5,7 +5,9 @@ gravity, mine ore from surface deposits, construct auto-aim turrets at build
 pads, and defend against UFOs that drift in from off-screen. There's also
 a second planet — **Ember**, a rust-coloured wilderness world at orbit
 radius 1800 — for when home gets boring; a Hohmann transfer takes about
-52 seconds.
+52 seconds. Planet has a small grey **Moon** in a hierarchical orbit
+(orbit radius 250, period ~12s) — fast enough to lap you, small enough
+that landings need real precision.
 
 ## Run
 
@@ -85,11 +87,14 @@ into a navigation instrument rather than just a pretty line:
   eccentric. Bonus: tangential burns at apsides are the most efficient
   way to reshape an orbit, because all your delta-v goes into reshaping
   rather than rotating.
-- **Magenta diamond — closest pass to the *other* landable body**: e.g.,
-  if you're orbiting Planet, this is where you'd get nearest Ember in
-  the predicted window. To set up a Hohmann transfer, burn prograde at
-  apo (or peri, if your peri is on the right side) and watch the diamond
-  slide toward Ember on the orange ghost.
+- **Magenta diamond — closest pass to the nearest non-anchor landable
+  body**: with three landable bodies (Planet, Moon, Ember) the marker
+  picks whichever is your most useful "next destination" — near Planet
+  it's the Moon, near Moon it's Planet, near Ember it's the Planet
+  system. The HUD label `(vs <body>)` tells you which one. To set up
+  a Hohmann transfer, burn prograde at apo (or peri, if your peri is
+  on the right side) and watch the diamond slide toward your target
+  on the orange ghost.
 - **Gold ring — sphere-of-influence (SOI) crossing**: where the
   gravitationally-dominant body changes along your path (e.g., you cross
   out of the planet's Hill sphere into the sun's domain). Inside one
@@ -105,8 +110,8 @@ into a navigation instrument rather than just a pretty line:
   you honest about how far ahead is "trustworthy."
 
 The plan-mode (orange) line gets the same annotations, so trimming a
-Hohmann is "step `]` until the orange diamond touches Ember" rather
-than mental arithmetic.
+Hohmann is "step `]` until the orange diamond touches your target"
+rather than mental arithmetic.
 
 ## Notable design choices
 
@@ -287,6 +292,9 @@ ribbon) makes that visible.
 | `PLANET_MU` | 4e6 | Planet's gravitational parameter |
 | `SUN_MU` | 8e6 | Sun's gravitational parameter |
 | `PLANET_ORBIT_RADIUS` | 800 | Planet-sun distance |
+| `MOON_MU` | 2e5 | Moon's gravitational parameter (small but non-zero) |
+| `MOON_ORBIT_RADIUS` | 250 | Moon-planet distance (well inside Planet's Hill ~441) |
+| `MOON_RADIUS` | 25 | Moon body radius (small target — land slow) |
 | `PREDICT_MAX_SECONDS` | 1000 | Predictor look-ahead ceiling (~16.7 min) |
 | `PREDICT_TARGET_STEPS` | 6400 | Predictor step-cap default (F5/F6 mutate at runtime) |
 | `PREDICT_TARGET_STEPS_MIN` | 100 | F5 floor — coarse but legal |
@@ -295,7 +303,11 @@ ribbon) makes that visible.
 | `PREDICT_TICK_HALFLEN` | 5 | Tick half-length, screen-space pixels (zoom-invariant) |
 
 Derived: planet orbital speed ≈ 100 px/s; orbital period ≈ 50 s; Hill sphere
-radius ≈ 441 px.
+radius ≈ 441 px. Moon orbital speed ≈ 126.5 px/s around Planet; period
+≈ 12.4 s; Moon's own Hill sphere ≈ 64 px (so above the Moon's surface
+there's only ~39 px before Planet's gravity takes over — landings need
+to come in slow). The Moon laps the player's default 370-px circular
+orbit because shorter orbits are faster; intercepts are real puzzles.
 
 ### Bug-fix history (don't reintroduce)
 
