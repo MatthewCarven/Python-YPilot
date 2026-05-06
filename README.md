@@ -38,7 +38,9 @@ See the docstring at the top of `ypilot.py` for the full list. Briefly:
 - **Space** pause + plan-mode "what-if" overlay: mouse aims a burn direction, an orange ghost trajectory shows where the ship would end up if it received an instantaneous delta-v in that direction. Bodies, ship, enemies, fuel all freeze. Use it to plan Hohmann transfers or surface-skim approaches before committing. Press Space again to resume without burning.
 - **[ / ]** (paused only) shorten / lengthen the planned burn duration in 0.1s steps. **Ctrl + [ / ]** = 0.01s precision step, **Ctrl+Shift + [ / ]** = 0.001s extra-fine step (mirrors the thrust trim ladder — for trimming Hohmann burns to milliseconds). Duration is signed: stepping past 0 into negatives previews a retro burn from the same aim point — A/B forward vs. reverse without spinning the mouse 180°
 - **Enter** (paused only) commit the planned burn: apply the impulse the orange trajectory shows and unpause. Lifts off automatically if landed.
+- **F9** toggle video recording. Pipes raw RGB frames to ffmpeg (must be on `PATH` — `winget install ffmpeg` / `brew install ffmpeg`) and writes a timestamped `.mp4` next to `ypilot.py`. Output is 30 fps H.264/yuv420p, paced against wall-clock time: when the game stutters, the recorder dwells on the previous frame for the right number of output slots so a 500 ms hitch shows up as a 500 ms freeze rather than 17 ms of sped-up footage. Encode runs on a worker thread with a bounded frame queue and a drop-on-full policy, so the game loop never blocks waiting on ffmpeg. HUD shows `REC` plus written / dropped frame counts while active.
 - **F11** toggle fullscreen
+- **F12** save screenshot (PNG) next to `ypilot.py`
 - **R** reset world; **Esc** quit
 
 Soft landing requires low relative speed (≤35 px/s vs. the body) and nose

@@ -59,6 +59,14 @@ Controls:
     Enter              (paused only) commit the planned burn: apply the
                        impulse the orange trajectory shows and unpause.
                        Lifts off automatically if landed.
+    F9                 toggle video recording. Pipes raw frames to ffmpeg
+                       (must be on PATH) and writes a timestamped .mp4
+                       next to ypilot.py. 30fps H.264/yuv420p output paced
+                       against wall-clock -- a 500ms stutter shows as a
+                       500ms freeze in the recording, not as sped-up
+                       footage. Encode runs on a worker thread so the
+                       game loop never blocks. HUD shows REC + frame
+                       counts while active.
     F11                toggle fullscreen
     F12                save screenshot (PNG) next to ypilot.py
     R                  reset world
@@ -72,8 +80,12 @@ Run:
 import datetime
 import math
 import os
+import queue
 import random
+import subprocess
 import sys
+import threading
+import time
 
 import pygame
 from pygame.math import Vector2
@@ -1760,6 +1772,197 @@ def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad]
     return bodies, planet, sun, deposits, pads, [], [], []
 
 
+# ============================================================================
+# Video recorder
+# ============================================================================
+
+class Recorder:
+    """Pipe pygame frames to ffmpeg for real-time video encoding, with
+    wall-clock-faithful pacing.
+
+    A worker thread drains a bounded queue of (rgb_bytes, repeat_count)
+    chunks and writes them to ffmpeg's stdin. The main thread calls
+    feed(surface) after each pygame.display.flip(); the surface->bytes
+    conversion happens on the main thread (one memcpy per fed frame), the
+    chunk gets pushed onto the queue, and the encode runs in ffmpeg's
+    process. If the queue is full (encoder is behind), the chunk is
+    dropped rather than blocking the main loop -- recording never
+    introduces sim hitching.
+
+    Wall-clock pacing: ffmpeg sees a fixed 30fps stream, but the recorder
+    decides at each feed() call how many of those 30fps slots have elapsed
+    in real time since the last call, and pushes either zero (game running
+    fast, skip), one (game running on-pace), or many copies (game stuttered)
+    of the previous on-screen frame plus one of the new frame. Net effect:
+    a 0.5s game stutter shows as a 0.5s freeze in the recording instead of
+    being compressed to 17ms of footage. Output rate is fixed 30fps but
+    the frame *content* is variable, so a stuttering game produces a
+    legibly slowed-down video rather than a sped-up one.
+
+    Output codec is H.264/yuv420p, universally playable on Windows /
+    browsers / social platforms.
+
+    Requires ffmpeg on PATH (winget install ffmpeg / brew install ffmpeg).
+    On spawn failure the recorder silently no-ops after printing a hint
+    once, so a missing ffmpeg never crashes the game.
+    """
+
+    QUEUE_SIZE = 8       # bounded buffer between main thread and writer
+    OUTPUT_FPS = 30      # what gets written to disk
+
+    def __init__(self) -> None:
+        self.recording = False
+        self.proc: subprocess.Popen | None = None
+        self.thread: threading.Thread | None = None
+        self.queue: queue.Queue | None = None
+        self.filename: str | None = None
+        self.frames_written = 0   # output frames the writer has pushed to ffmpeg
+        self.frames_dropped = 0   # output slots lost to queue.Full
+        self._size: tuple[int, int] | None = None
+        self._start_wall: float | None = None  # set lazily on first feed
+        self._frames_pushed = 0   # output slots accounted for (may be in-queue)
+        self._last_data: bytes | None = None  # most recently fed surface bytes
+
+    def start(self, screen_size: tuple[int, int], out_dir: str) -> None:
+        if self.recording:
+            return
+        w, h = screen_size
+        stamp = datetime.datetime.now().strftime("%Y-%m-%d - %H-%M-%S")
+        path = os.path.join(out_dir, f"{stamp}.mp4")
+        # Raw RGB frames in, H.264 yuv420p out. preset=veryfast keeps the
+        # encoder ahead of the game loop; crf=23 is the libx264 default and
+        # produces a sane size/quality tradeoff for posting online.
+        cmd = [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24",
+            "-s", f"{w}x{h}", "-r", str(self.OUTPUT_FPS),
+            "-i", "-",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "23",
+            "-pix_fmt", "yuv420p",
+            path,
+        ]
+        try:
+            self.proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            print(
+                "Recording: ffmpeg not found on PATH. Install ffmpeg "
+                "(winget install ffmpeg / brew install ffmpeg) and retry.",
+                file=sys.stderr,
+            )
+            self.proc = None
+            return
+        self.queue = queue.Queue(maxsize=self.QUEUE_SIZE)
+        self.thread = threading.Thread(target=self._writer, daemon=True)
+        self.thread.start()
+        self.recording = True
+        self.filename = path
+        self.frames_written = 0
+        self.frames_dropped = 0
+        self._size = (w, h)
+        self._start_wall = None
+        self._frames_pushed = 0
+        self._last_data = None
+
+    def feed(self, surface: pygame.Surface) -> None:
+        if not self.recording or self.queue is None:
+            return
+        if surface.get_size() != self._size:
+            return  # window resized mid-recording; bail rather than scribble
+        now = time.monotonic()
+        if self._start_wall is None:
+            self._start_wall = now
+        # How many output slots SHOULD have been written by now, given the
+        # target framerate and how long we've been recording? Subtract the
+        # ones we've already accounted for to get how many we owe.
+        target_total = int((now - self._start_wall) * self.OUTPUT_FPS) + 1
+        owed = max(0, target_total - self._frames_pushed)
+        if owed == 0:
+            return  # game is running faster than OUTPUT_FPS; skip this frame
+        # Convert the new frame to bytes (the costly bit on the main thread).
+        try:
+            new_data = pygame.image.tostring(surface, "RGB")
+        except pygame.error:
+            return
+        # When owed > 1 the game stuttered: the previous on-screen frame was
+        # visible for the dwell. Push it for (owed - 1) slots, then push the
+        # new frame for the final slot. Net: wall-clock pacing matches reality
+        # and the freeze sits on the right frame, not the post-hitch one.
+        if owed > 1 and self._last_data is not None:
+            prev_count = owed - 1
+            try:
+                self.queue.put_nowait((self._last_data, prev_count))
+            except queue.Full:
+                self.frames_dropped += prev_count
+            # Advance the pacing counter regardless of whether we enqueued or
+            # dropped -- otherwise a single queue-full event would make every
+            # subsequent feed think it owes more frames, snowballing.
+            self._frames_pushed += prev_count
+            owed = 1
+        try:
+            self.queue.put_nowait((new_data, owed))
+        except queue.Full:
+            self.frames_dropped += owed
+        self._frames_pushed += owed
+        self._last_data = new_data
+
+    def stop(self) -> None:
+        if not self.recording:
+            return
+        # Sentinel tells the writer to flush and close ffmpeg's stdin.
+        if self.queue is not None:
+            try:
+                self.queue.put(None, timeout=2.0)
+            except queue.Full:
+                pass
+        if self.thread is not None:
+            self.thread.join(timeout=10.0)
+        self.recording = False
+
+    def _writer(self) -> None:
+        proc = self.proc
+        q = self.queue
+        try:
+            while True:
+                item = q.get()
+                if item is None:
+                    break
+                # Each chunk is (data, repeat_count). A long stutter shows up
+                # as a single chunk with repeat_count=N rather than N queue
+                # entries -- that's how a 5-second pause survives a queue of
+                # only QUEUE_SIZE slots without dropping anything.
+                data, count = item
+                try:
+                    for _ in range(count):
+                        proc.stdin.write(data)
+                except (BrokenPipeError, OSError):
+                    break
+                self.frames_written += count
+        finally:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            # Flip the flag so feed() short-circuits if ffmpeg died on us.
+            self.recording = False
+
+
+# ============================================================================
+# Main loop
+# ============================================================================
+
 def main() -> None:
     global WIDTH, HEIGHT
     pygame.init()
@@ -1782,6 +1985,7 @@ def main() -> None:
     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
     enemies_enabled = True
     kills = 0
+    recorder = Recorder()
 
     camera = Camera()
     camera.zoom = 1.0
@@ -1905,6 +2109,12 @@ def main() -> None:
                     stamp = datetime.datetime.now().strftime("%Y-%m-%d - %H-%M-%S")
                     out_dir = os.path.dirname(os.path.abspath(__file__))
                     pygame.image.save(screen, os.path.join(out_dir, f"{stamp}.png"))
+                elif event.key == pygame.K_F9:
+                    if recorder.recording:
+                        recorder.stop()
+                    else:
+                        out_dir = os.path.dirname(os.path.abspath(__file__))
+                        recorder.start(screen.get_size(), out_dir)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_clicked = True
 
@@ -2138,8 +2348,26 @@ def main() -> None:
                     candidate_pad.turret = new_t
                     turrets.append(new_t)
 
+        # Recording indicator: small red dot + counts in the top-right.
+        # Drawn after every other UI element so it appears in the recorded
+        # frame too -- intentional, like an OBS REC tally; if you don't
+        # want it on the video, F9 to stop before whatever you're showing.
+        if recorder.recording:
+            rec_text = (f"REC  {recorder.frames_written} frames"
+                        f"  ({recorder.frames_dropped} dropped)")
+            rec_surf = font.render(rec_text, True, (255, 90, 90))
+            tx = WIDTH - rec_surf.get_width() - 32
+            ty = 16
+            pygame.draw.circle(screen, (255, 60, 60),
+                               (tx - 14, ty + rec_surf.get_height() // 2), 6)
+            screen.blit(rec_surf, (tx, ty))
+
         pygame.display.flip()
 
+        # Feed AFTER flip so the recording matches what the user just saw.
+        recorder.feed(screen)
+
+    recorder.stop()
     pygame.quit()
     sys.exit(0)
 
