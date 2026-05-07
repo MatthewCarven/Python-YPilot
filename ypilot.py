@@ -34,6 +34,13 @@ Controls:
                        tangential drift alone (lines you up over a pad)
     Ctrl  (while H on) damp autopilot to 0.25x strength (fine soft landings)
     Shift+Ctrl (H on)  hover-hold at 0.25x strength
+    J                  toggle path-hold autopilot. Tracks the most-recently-
+                       committed plan-mode trajectory using small corrective
+                       thrust (capped at 5% of nominal). Nulls phase drift
+                       and small chaotic perturbations so you stay glued
+                       to the orange-line plan you just fired. Cancels on
+                       W/S like brake-assist; mutually exclusive with H.
+                       No-op if no plan committed yet, or if landed.
     B (hold)           build mode while landed near an unoccupied build pad
     + / =              zoom in
     - / _              zoom out
@@ -43,6 +50,11 @@ Controls:
     F5 / F6            halve / double the predictor's step budget; coarser
                        steps are cheaper but less faithful, finer steps cost
                        more per frame. Current value shown on HUD.
+    F7 / F8            halve / double simulation time scale (1/16x to 16x).
+                       Slows down or speeds up live physics + enemies +
+                       turrets together. Plan-mode (Space) is unaffected --
+                       paused is paused. Current value shown on HUD when
+                       not 1.0x. R resets back to 1.0x.
     F10                toggle enemy spawns (also clears any in scene)
     Space              pause + plan-mode "what-if" overlay. Mouse aims a
                        burn direction; an orange ghost trajectory shows where
@@ -56,9 +68,34 @@ Controls:
     Ctrl + [ / ]       (paused only) duration step at 0.01s (precision)
     Ctrl+Shift + [ / ] (paused only) duration step at 0.001s (extra-fine)
     Alt + [ / ]        (paused only) duration step at 0.0001s (super-fine)
-    Enter              (paused only) commit the planned burn: apply the
-                       impulse the orange trajectory shows and unpause.
-                       Lifts off automatically if landed.
+    , / .              (paused only, also < / >) shift the current preview
+                       burn's fire-time forward / backward along the
+                       trajectory in 0.1s steps. Lets you stage a burn at
+                       a specific future point (e.g., apo) without first
+                       expanding predict_seconds. Floor is the previous
+                       queued burn's offset (chain stays monotonic);
+                       ceiling is PREDICT_MAX_SECONDS.
+    Ctrl + , / .       (paused only) offset step at 0.01s (precision)
+    Ctrl+Shift + , / . (paused only) offset step at 0.001s (extra-fine)
+    Alt + , / .        (paused only) offset step at 0.0001s (super-fine)
+    Enter              (paused only) commit the planned chain: burn 0
+                       fires immediately, queued burns fire on schedule,
+                       and the sim resumes. Lifts off automatically if
+                       landed. With an empty queue this behaves exactly
+                       like the old single-burn commit.
+    N                  (paused only) push the current preview onto the
+                       maneuver chain and start planning the next burn.
+                       The next preview burn defaults to the SAME fire-
+                       time as the burn you just queued (camera stays
+                       glued to the burn point) -- use , / . afterwards
+                       to push it forward in time, or just plan another
+                       burn at the same instant for stacked retro+lateral
+                       combos. Each chained burn gets a numbered chevron
+                       on the orange trajectory.
+    Backspace          (paused only) pop the last queued burn back into
+                       the editable preview slot, restoring its duration
+                       AND its fire-time offset. Useful for retuning a
+                       burn without re-planning from scratch.
     F9                 toggle video recording. Pipes raw frames to ffmpeg
                        (must be on PATH) and writes a timestamped .mp4
                        next to ypilot.py. 30fps H.264/yuv420p output paced
@@ -104,6 +141,18 @@ BG = (8, 8, 20)
 # the per-frame catch-up after a stall so we don't spiral after a hitch.
 PHYSICS_DT = 1.0 / FPS
 MAX_FRAME_DT = 0.25
+
+# --- Time scale (F7/F8) -----------------------------------------------------
+# Multiplier on the wall-time fed into the physics accumulator each frame.
+# 1.0 = real time. < 1.0 = slow-mo (more in-game frames per game-second of
+# motion -- handy for landings). > 1.0 = fast-forward (fewer in-game frames
+# per game-second -- handy for long Hohmann coasts). Bounds are four
+# halvings/doublings each way, mirroring F5/F6's range pattern.
+# At very high scales the accumulator caps at MAX_FRAME_DT so 16x effectively
+# tops out around ~15x per frame; the cap is there so a stall can't burst.
+TIME_SCALE_DEFAULT = 1.0
+TIME_SCALE_MIN = 1.0 / 16.0
+TIME_SCALE_MAX = 16.0
 
 # --- Zoom -------------------------------------------------------------------
 ZOOM_MIN = 0.125
@@ -206,6 +255,29 @@ BRAKE_KP = 2.0
 BRAKE_MAX_ACCEL = SHIP_THRUST * 3.0
 BRAKE_RING_COLOR = (90, 200, 255)
 
+# --- Path-hold autopilot ---------------------------------------------------
+# Tracks the most-recently-committed plan-mode trajectory. At commit time the
+# main loop snapshots the predictor's (t, pos, vel) samples and stores them
+# on the ship. While engaged (J), every frame the autopilot interpolates the
+# planned state at sim_time and applies a small corrective acceleration:
+#   a = PATH_HOLD_KP * (planned_pos - pos) + PATH_HOLD_KD * (planned_vel - vel)
+# clamped at PATH_HOLD_MAX_ACCEL. This nulls phase drift and small chaotic
+# perturbations without trying to chase gravitationally infeasible paths.
+# The cap is deliberately small: if the live trajectory has diverged enough
+# that a 5%-thrust correction can't catch up in a few seconds, the plan is
+# probably stale and re-planning is the right answer.
+# Cancelled by W/S like brake-assist (player override). Q/E doesn't cancel,
+# matching brake-assist's "strafe + autopilot" workflow. Mutually exclusive
+# with brake-assist -- they'd fight each other.
+PATH_HOLD_KP = 2.0
+PATH_HOLD_KD = 3.0
+PATH_HOLD_MAX_ACCEL = SHIP_THRUST * 0.05  # 5% thrust ceiling: phase-drift only
+PATH_HOLD_RING_COLOR = (255, 170, 90)     # matches PLAN_COLOR -- "tracking the orange line"
+# Lookahead horizon for the saved trajectory: snapshot extends past the last
+# scheduled burn by this much, so path-hold has somewhere to track to after
+# the chain finishes.
+PATH_HOLD_POSTBURN_SECONDS = 60.0
+
 # --- Trajectory prediction --------------------------------------------------
 PREDICT_SECONDS = 30.0           # default look-ahead
 PREDICT_MIN_SECONDS = 5.0        # `/` key floor
@@ -218,6 +290,12 @@ PREDICT_DRAW_STRIDE = 6
 PREDICT_TICK_INTERVAL = 5.0      # seconds between perpendicular tick marks
 PREDICT_TICK_HALFLEN = 5         # tick half-length, screen-space pixels
 PREDICT_COLOR = (90, 200, 255)
+# End-of-trajectory colour: lerp from PREDICT_COLOR (cyan/blue) at the ship
+# end of the line to PREDICT_COLOR_END (bright red) at the far horizon end,
+# so the tip of the line stays visible at full brightness instead of fading
+# into the background. The thickness ramp (still 1->3 px) keeps the chaos
+# cone cue without dimming readability.
+PREDICT_COLOR_END = (255, 90, 90)
 PREDICT_IMPACT_COLOR = (255, 90, 90)
 APSIS_PERI_COLOR = (255, 130, 100)   # warm peach: closer to body
 APSIS_APO_COLOR = (140, 200, 255)    # cool blue: farther from body
@@ -242,8 +320,33 @@ PLAN_BURN_DURATION_STEP = 0.1               # plain [ / ]
 PLAN_BURN_DURATION_PRECISION_STEP = 0.01    # Ctrl + [ / ]
 PLAN_BURN_DURATION_FINE_STEP = 0.001        # Ctrl+Shift + [ / ]
 PLAN_BURN_DURATION_SUPERFINE_STEP = 0.0001  # Alt + [ / ]
+# , / . (i.e. < / >) move the CURRENT preview burn's fire-time along the
+# trajectory. Same precision ladder as the duration ladder above. Floor is
+# the previous queued burn's offset so chain ordering stays monotonic;
+# ceiling is PREDICT_MAX_SECONDS. The offset is *user-controlled* once the
+# preview slot is active; auto-fill happens only when the slot resets (entry
+# to plan mode, after N, after Backspace).
+PLAN_BURN_OFFSET_STEP = 0.1               # plain , / .
+PLAN_BURN_OFFSET_PRECISION_STEP = 0.01    # Ctrl + , / .
+PLAN_BURN_OFFSET_FINE_STEP = 0.001        # Ctrl+Shift + , / .
+PLAN_BURN_OFFSET_SUPERFINE_STEP = 0.0001  # Alt + , / .
 PLAN_COLOR = (255, 170, 90)       # warm orange, distinct from PREDICT cyan
+# Same gradient treatment as the predicted line: orange near the ship,
+# fading to bright red at the horizon. Full brightness throughout so the
+# end of the chained-burn ghost stays readable.
+PLAN_COLOR_END = (255, 90, 90)
 PLAN_IMPACT_COLOR = (255, 90, 90)
+# --- Maneuver chain (multi-burn plan) ---------------------------------------
+# Plan mode lets the player queue a sequence of burns instead of just one.
+# Press N to push the current preview onto the chain, then plan the next
+# burn; press Backspace to pop the last queued; press Enter to commit the
+# whole chain (burn 0 fires immediately, burn k fires k * spacing after).
+# The default spacing between chained burns is the predict_seconds at the
+# moment the burn is added -- so adjusting `*` / `/` lets you stretch or
+# compress the gap to taste.
+CHAIN_BURN_MARKER_RADIUS = 5     # filled chevron at each scheduled burn point
+CHAIN_BURN_MARKER_COLOR = (255, 220, 130)  # paler orange than PLAN_COLOR
+PLAN_CHAIN_LOOKAHEAD_SCALE = 1.0  # plan trajectory horizon = (chain_span + this * predict_seconds)
 
 # --- Mining / resources -----------------------------------------------------
 NUM_DEPOSITS = 6
@@ -364,7 +467,7 @@ class Body:
             tangent = Vector2(-radial.y, radial.x)
             self.pos = self.parent.pos + radial * self.orbit_radius
             self.vel = self.parent.vel + tangent * (self.omega * self.orbit_radius)
-    
+
     def position_at(self, t: float) -> Vector2:
         if self.parent is None:
             return Vector2(0.0, 0.0)
@@ -740,7 +843,7 @@ def generate_buildpads(body: Body, n: int = NUM_BUILDPADS) -> list[BuildPad]:
 class Ship:
     def __init__(self, planet: Body):
         self.reset(planet)
-    
+
     def reset(self, planet: Body) -> None:
         start_r = planet.radius + 280.0
         v_rel = circular_orbit_speed(planet, start_r)
@@ -764,16 +867,129 @@ class Ship:
         self.landed_body = None
         self.landed_radial = 0.0
         self.alive = True
-    
+        # Scheduled maneuvers (chained-burn plan committed via Enter): each
+        # entry is (apply_at_sim_time, burn_dir_unit_vector, duration_signed).
+        # apply_pending_maneuvers fires any whose time has been reached.
+        self.pending_maneuvers = []
+        # Path-hold autopilot state. planned_trajectory is a parallel list of
+        # (t, pos, vel) samples produced by the predictor at commit time.
+        # _path_hold_hint caches the last-found bracket index so per-frame
+        # lookup is O(1) typical instead of O(n) (the trajectory can have
+        # thousands of samples on long chains).
+        self.path_hold = False
+        self.planned_trajectory = []
+        self._path_hold_hint = 0
+        self.path_hold_error = 0.0     # last frame's pos-error magnitude (HUD)
+        self._sim_time = 0.0           # cached by update() for _compute_accel
+        # Cached corrective accel from the path-hold controller. Computed
+        # ONCE per update() against start-of-step state, reused for both
+        # leapfrog half-kicks. Computing fresh per half-kick would compare
+        # start-of-step ship pos to end-of-step plan time -- a one-step
+        # phase offset the controller would burn fuel fighting forever.
+        self._path_hold_cached_accel = Vector2(0.0, 0.0)
+
+    def apply_pending_maneuvers(self, sim_time: float) -> None:
+        """Fire any scheduled maneuvers whose apply-time has been reached.
+
+        Reuses commit_planned_burn so each chain step matches what the
+        plan-mode predictor showed (same fuel cost, same impulse model,
+        same nose-direction snap). If a burn aborts (out of fuel / dead),
+        the rest of the chain is dropped -- no point firing into the void.
+        """
+        while self.pending_maneuvers and self.pending_maneuvers[0][0] <= sim_time:
+            _t, burn_dir, duration_signed = self.pending_maneuvers.pop(0)
+            if not self.commit_planned_burn(burn_dir, duration_signed):
+                self.pending_maneuvers.clear()
+                return
+
     def toggle_brake_assist(self) -> None:
         if self.alive and not self.landed and self.fuel > 0.0:
             self.brake_assist = not self.brake_assist
-    
+            if self.brake_assist:
+                # Brake-assist and path-hold are different state-space
+                # targets (match-body vs match-plan). Letting them both run
+                # would be a tug-of-war; only one autopilot at a time.
+                self.path_hold = False
+
+    def toggle_path_hold(self) -> bool:
+        """Toggle the path-hold autopilot. Returns True if engaged after the
+        toggle, False otherwise. No-op (returns current state) if there's no
+        committed plan to track, or if landed / dead / out of fuel."""
+        if not self.alive or self.landed or self.fuel <= 0.0:
+            return self.path_hold
+        if self.path_hold:
+            self.path_hold = False
+            return False
+        if not self.planned_trajectory:
+            return False  # nothing to track
+        self.path_hold = True
+        self.brake_assist = False
+        self._path_hold_hint = 0
+        return True
+
+    def set_planned_trajectory(self,
+                               samples: list[tuple[float, Vector2, Vector2]]
+                               ) -> None:
+        """Replace the saved plan-mode trajectory with a fresh snapshot.
+        Called by the main loop on Enter-commit. Resets the bracket-search
+        hint so the next path-hold frame searches from sample 0."""
+        self.planned_trajectory = samples
+        self._path_hold_hint = 0
+
+    def _path_hold_accel(self, sim_time: float) -> Vector2:
+        """PD correction toward the planned (pos, vel) at sim_time.
+
+        Linear-interpolates between the two trajectory samples that bracket
+        sim_time. Caches the search-bracket index across frames since
+        sim_time only ever moves forward -- O(1) typical, O(n) worst case
+        on a re-engage. If sim_time is past the last sample (plan stale),
+        auto-disengage path-hold so the player isn't surprised by a silent
+        no-op autopilot. If the plan hasn't started yet (sim_time before
+        the first sample, e.g. you somehow time-travelled), clamp to the
+        first sample -- shouldn't happen in normal flow.
+        """
+        if not self.path_hold or not self.planned_trajectory:
+            return Vector2(0.0, 0.0)
+        samples = self.planned_trajectory
+        if sim_time >= samples[-1][0]:
+            self.path_hold = False  # plan exhausted
+            return Vector2(0.0, 0.0)
+        # Walk forward from the cached hint until we bracket sim_time.
+        i = max(0, min(self._path_hold_hint, len(samples) - 2))
+        while i + 1 < len(samples) and samples[i + 1][0] < sim_time:
+            i += 1
+        # Edge case: sim_time before the first sample. Use sample 0.
+        if sim_time <= samples[0][0]:
+            target_pos = Vector2(samples[0][1])
+            target_vel = Vector2(samples[0][2])
+        else:
+            t0, p0, v0 = samples[i]
+            t1, p1, v1 = samples[i + 1]
+            span = t1 - t0
+            u = (sim_time - t0) / span if span > 1e-9 else 0.0
+            target_pos = p0.lerp(p1, u)
+            target_vel = v0.lerp(v1, u)
+        self._path_hold_hint = i
+        pos_err = target_pos - self.pos
+        vel_err = target_vel - self.vel
+        self.path_hold_error = pos_err.length()
+        desired = pos_err * PATH_HOLD_KP + vel_err * PATH_HOLD_KD
+        mag = desired.length()
+        if mag > PATH_HOLD_MAX_ACCEL:
+            desired *= (PATH_HOLD_MAX_ACCEL / mag)
+        return desired
+
+
     def update(self, dt: float, keys, mods: int, deposits: list[Deposit],
                bodies: list[Body], mouse_pos: tuple[int, int] | None = None,
-               mouse_aim_active: bool = True) -> None:
+               mouse_aim_active: bool = True,
+               sim_time: float = 0.0) -> None:
         if not self.alive:
             return
+        # Cached for _compute_accel so path-hold can look up the planned
+        # state at the right time without changing _compute_accel's
+        # signature (kept matching the leapfrog's per-half-step contract).
+        self._sim_time = sim_time
 
         # Tick down the post-liftoff steering lock. While > 0, mouse aim and
         # turn keys are suppressed so a fresh boost climbs cleanly upward
@@ -816,9 +1032,11 @@ class Ship:
             self.strafing_right = False
             self.thrust_scale = THRUST_BOOST_SCALE
             self.brake_assist = False
+            self.path_hold = False
 
         if self.landed and self.landed_body is not None:
             self.brake_assist = False
+            self.path_hold = False
             body = self.landed_body
             radial = Vector2(math.cos(self.landed_radial),
                              math.sin(self.landed_radial))
@@ -852,6 +1070,20 @@ class Ship:
             self.thrusting = False
             self.retro_thrusting = False
             self.brake_assist = False
+            self.path_hold = False
+
+        # Compute the path-hold correction ONCE for this update, against the
+        # plan time that matches start-of-step ship state (sim_time - dt --
+        # main() advances sim_time before calling update()). _compute_accel
+        # then reads the cached value for both leapfrog half-kicks. This
+        # avoids the constant ~vel*dt position bias that would otherwise
+        # have the controller burning fuel to chase the next frame's plan.
+        if self.path_hold:
+            self._path_hold_cached_accel = self._path_hold_accel(
+                self._sim_time - dt
+            )
+        else:
+            self._path_hold_cached_accel = Vector2(0.0, 0.0)
 
         burn = 0.0
         if self.thrusting:
@@ -865,6 +1097,8 @@ class Ship:
         if self.brake_assist:
             desired = self._brake_assist_accel(self.pos, self.vel, bodies)
             burn += (desired.length() / SHIP_THRUST) * dt
+        if self.path_hold:
+            burn += (self._path_hold_cached_accel.length() / SHIP_THRUST) * dt
         self.fuel = max(0.0, self.fuel - burn)
 
         a0 = self._compute_accel(self.pos, self.vel, bodies)
@@ -940,6 +1174,7 @@ class Ship:
         #   Ctrl+Shift    = 0.001       (extra-fine)
         if forward_pressed:
             self.brake_assist = False
+            self.path_hold = False
             if ctrl and shift:
                 self.thrust_scale = THRUST_FINE_SCALE
             elif shift:
@@ -956,6 +1191,7 @@ class Ship:
         #   Ctrl+Shift    = RETRO_FINE_SCALE        (0.1%)
         if reverse_pressed:
             self.brake_assist = False
+            self.path_hold = False
             if ctrl and shift:
                 self.retro_scale = RETRO_FINE_SCALE
             elif ctrl:
@@ -1005,6 +1241,12 @@ class Ship:
                 accel -= pilot_left_dir * (SHIP_THRUST * LATERAL_THRUST_SCALE)
 
         accel += self._brake_assist_accel(pos, vel, bodies)
+        # Path-hold contribution was computed once per update() against
+        # start-of-step state; we just add the cached value here so both
+        # leapfrog half-kicks see the same correction. Re-computing per
+        # half-kick would introduce a one-PHYSICS_DT phase bias.
+        if self.path_hold:
+            accel += self._path_hold_cached_accel
         accel += gravity_at(pos, bodies)
         return accel
 
@@ -1097,7 +1339,10 @@ class Ship:
                            dt: float | None = None,
                            pos0: Vector2 | None = None,
                            vel0: Vector2 | None = None,
-                           target_steps: int = PREDICT_TARGET_STEPS
+                           target_steps: int = PREDICT_TARGET_STEPS,
+                           pending_burns: list[tuple[float, Vector2, float]] | None = None,
+                           burn_indices: list[int] | None = None,
+                           out_velocities: list[Vector2] | None = None,
                            ) -> tuple[list[Vector2], float | None, float]:
         # Use PHYSICS_DT so the integrator matches the live sim step-for-step
         # over short/medium horizons -- the predicted ghost is then bit-
@@ -1110,21 +1355,51 @@ class Ship:
         # both half-kicks of the leapfrog, so the force model is identical.
         # pos0/vel0 override the ship's current state -- used by plan-mode
         # to predict from a hypothetical post-burn velocity.
+        # pending_burns is an optional list of (t_apply, burn_dir, duration_signed):
+        # the integrator inserts each kick at the step boundary that contains
+        # its apply-time, mirroring how live ship.apply_pending_maneuvers fires
+        # them (each kick = SHIP_THRUST * duration_signed in burn_dir, same
+        # impulse the live commit_planned_burn applies). Used by plan-mode
+        # chain previews. burn_indices, if provided, is filled with the
+        # points-list index at which each burn was applied (same length and
+        # order as pending_burns), so the caller can put a marker on each
+        # burn point. out_velocities, if provided, is filled in lockstep
+        # with `points` so callers can capture the full state-space
+        # trajectory (used by path-hold autopilot to track planned vel).
         if dt is None:
             dt = max(PHYSICS_DT, seconds / target_steps)
         n = max(2, int(seconds / dt))
         pos = Vector2(pos0) if pos0 is not None else Vector2(self.pos)
         vel = Vector2(vel0) if vel0 is not None else Vector2(self.vel)
         points = [Vector2(pos)]
+        if out_velocities is not None:
+            out_velocities.append(Vector2(vel))
         impact_speed = None
+        # Apply burns lazily: walk a pointer through the list, applying any
+        # whose t_apply has been reached at the start of the next step.
+        burns = list(pending_burns) if pending_burns else []
+        burn_idx = 0
         for i in range(n):
+            t1 = t_start + i * dt
             t2 = t_start + (i + 1) * dt
+            # Apply any burns scheduled within (t1, t2] (and any "fire now"
+            # burns at t == t_start fire at the first step). Push the
+            # corresponding burn-point indices into burn_indices so the
+            # caller can mark them on the trajectory.
+            while burn_idx < len(burns) and burns[burn_idx][0] <= t2:
+                _, b_dir, b_dur = burns[burn_idx]
+                vel = vel + b_dir * (SHIP_THRUST * b_dur)
+                if burn_indices is not None:
+                    burn_indices.append(len(points) - 1)
+                burn_idx += 1
             a0 = gravity_at_t(pos, t2, bodies)
             v_half = vel + a0 * (dt * 0.5)
             pos = pos + v_half * dt
             a1 = gravity_at_t(pos, t2, bodies)
             vel = v_half + a1 * (dt * 0.5)
             points.append(Vector2(pos))
+            if out_velocities is not None:
+                out_velocities.append(Vector2(vel))
             hit = False
             for body in bodies:
                 bp = body.position_at(t2)
@@ -1167,6 +1442,12 @@ class Ship:
 
         if self.landed:
             pygame.draw.circle(surf, LANDED_RING_COLOR,
+                               (int(cx), int(cy)),
+                               max(1, int(SHIP_LEN * 1.6 * z)), 1)
+        elif self.path_hold:
+            # Path-hold has priority over brake-assist (mutually exclusive
+            # state-wise, but if both somehow set, ring shows path-hold).
+            pygame.draw.circle(surf, PATH_HOLD_RING_COLOR,
                                (int(cx), int(cy)),
                                max(1, int(SHIP_LEN * 1.6 * z)), 1)
         elif self.brake_assist:
@@ -1370,8 +1651,9 @@ def draw_enemy(surf: pygame.Surface, camera: Camera, e: Enemy) -> None:
 def _ghost_thickness(t: float) -> int:
     # Fattening ribbon expresses chaos uncertainty: even with bit-faithful
     # integration, a 3-body trajectory's true position spreads exponentially
-    # with horizon. The fade lerp toward BG already softens; the thickness
-    # ramp (1 -> 3 px) adds a visible "cone of doubt" cue further out.
+    # with horizon. Colour shifts blue -> red along the line (no brightness
+    # fade -- the tip stays readable against the BG); this thickness ramp
+    # (1 -> 3 px) layers the "cone of doubt" cue on top.
     return 1 + int(t * 2)
 
 
@@ -1454,21 +1736,50 @@ def draw_soi_markers(surf: pygame.Surface, camera: Camera,
             pygame.draw.circle(surf, SOI_CROSSING_COLOR, sp, 4, 1)
 
 
+def draw_chain_burn_markers(surf: pygame.Surface, camera: Camera,
+                            points: list[Vector2],
+                            indices: list[int],
+                            font: pygame.font.Font | None = None) -> None:
+    """Small filled chevrons + index labels at each scheduled burn point.
+    Lets the player see where on the chained trajectory each queued burn
+    will fire. The first burn (index 0) gets a "1" label so the chain reads
+    naturally; queued burns get 2..N, and the current preview burn is
+    labelled at indices[-1]. Skipped silently if the indices list is empty
+    or the points run out before the burn point (predictor cut short by
+    impact)."""
+    if not indices:
+        return
+    s = CHAIN_BURN_MARKER_RADIUS
+    for k, i in enumerate(indices):
+        if not (0 <= i < len(points)):
+            continue
+        cx, cy = camera.world_to_screen_int(points[i])
+        # Filled chevron (downward-pointing triangle) so it reads as "burn
+        # here" without competing visually with the apsis dots/diamonds.
+        tri = [(cx, cy - s), (cx + s, cy + s), (cx - s, cy + s)]
+        pygame.draw.polygon(surf, CHAIN_BURN_MARKER_COLOR, tri)
+        if font is not None:
+            label = font.render(str(k + 1), True, CHAIN_BURN_MARKER_COLOR)
+            surf.blit(label, (cx + s + 2, cy - s - 2))
+
+
 def _draw_trajectory_ticks(surf: pygame.Surface, camera: Camera,
                            points: list[Vector2], dt: float,
-                           base_color: tuple[int, int, int]) -> None:
+                           start_color: tuple[int, int, int],
+                           end_color: tuple[int, int, int]) -> None:
     """Perpendicular tick marks at every PREDICT_TICK_INTERVAL seconds along
-    the trajectory. Tick length is screen-space (zoom-invariant); color and
-    thickness fade with the ribbon so distant ticks dim out alongside the
-    line."""
+    the trajectory. Tick length is screen-space (zoom-invariant). Color
+    lerps from start_color at the ship end to end_color at the horizon
+    end, matching the line itself -- both stay at full brightness so the
+    end of the trajectory remains readable."""
     n = len(points)
     if n < 3 or dt <= 0.0:
         return
     samples_per_tick = PREDICT_TICK_INTERVAL / dt
     if samples_per_tick < 1.0:
         return
-    bg_r, bg_g, bg_b = BG
-    base_r, base_g, base_b = base_color
+    sr, sg, sb = start_color
+    er, eg, eb = end_color
     k = 1
     while True:
         i = int(round(samples_per_tick * k))
@@ -1486,9 +1797,9 @@ def _draw_trajectory_ticks(surf: pygame.Surface, camera: Camera,
         px, py = -dys / mag, dxs / mag
         cx, cy = camera.world_to_screen(points[i])
         t = i / (n - 1)
-        r = int(base_r * (1 - t) + bg_r * t)
-        g = int(base_g * (1 - t) + bg_g * t)
-        b_ch = int(base_b * (1 - t) + bg_b * t)
+        r = int(sr * (1 - t) + er * t)
+        g = int(sg * (1 - t) + eg * t)
+        b_ch = int(sb * (1 - t) + eb * t)
         thickness = _ghost_thickness(t)
         x0 = int(cx + px * PREDICT_TICK_HALFLEN)
         y0 = int(cy + py * PREDICT_TICK_HALFLEN)
@@ -1503,8 +1814,8 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
     if len(points) < 2:
         return
     n = len(points)
-    bg_r, bg_g, bg_b = BG
-    base_r, base_g, base_b = PREDICT_COLOR
+    sr, sg, sb = PREDICT_COLOR
+    er, eg, eb = PREDICT_COLOR_END
     stride = PREDICT_DRAW_STRIDE
     last_screen = None
     last_t = 0.0
@@ -1512,15 +1823,16 @@ def draw_trajectory(surf: pygame.Surface, camera: Camera, points: list[Vector2],
         sp = camera.world_to_screen_int(points[i])
         if last_screen is not None:
             t = i / (n - 1)
-            r = int(base_r * (1 - t) + bg_r * t)
-            g = int(base_g * (1 - t) + bg_g * t)
-            b = int(base_b * (1 - t) + bg_b * t)
+            r = int(sr * (1 - t) + er * t)
+            g = int(sg * (1 - t) + eg * t)
+            b = int(sb * (1 - t) + eb * t)
             pygame.draw.line(surf, (r, g, b), last_screen, sp,
                              _ghost_thickness(0.5 * (last_t + t)))
             last_t = t
         last_screen = sp
 
-    _draw_trajectory_ticks(surf, camera, points, dt, PREDICT_COLOR)
+    _draw_trajectory_ticks(surf, camera, points, dt,
+                           PREDICT_COLOR, PREDICT_COLOR_END)
 
     if impact_speed is not None:
         ip = camera.world_to_screen_int(points[-1])
@@ -1533,16 +1845,19 @@ def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
                          points: list[Vector2],
                          impact_speed: float | None,
                          dt: float) -> None:
-    """Plan-mode counterpart to draw_trajectory: orange ribbon, same fade/stride.
+    """Plan-mode counterpart to draw_trajectory: orange ribbon at the ship
+    end, lerping to bright red at the horizon end. Same stride and
+    thickness ramp; full brightness throughout so the chained-burn ghost
+    stays readable past the predict_seconds horizon.
 
-    Drawn separately rather than parameterised onto draw_trajectory because the
-    impact end-marker uses a different palette (plan-mode impact is purely
-    informational, not a forecast)."""
+    Drawn separately rather than parameterised onto draw_trajectory because
+    the impact end-marker uses a different palette (plan-mode impact is
+    purely informational, not a forecast)."""
     if len(points) < 2:
         return
     n = len(points)
-    bg_r, bg_g, bg_b = BG
-    base_r, base_g, base_b = PLAN_COLOR
+    sr, sg, sb = PLAN_COLOR
+    er, eg, eb = PLAN_COLOR_END
     stride = PREDICT_DRAW_STRIDE
     last_screen = None
     last_t = 0.0
@@ -1550,15 +1865,16 @@ def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
         sp = camera.world_to_screen_int(points[i])
         if last_screen is not None:
             t = i / (n - 1)
-            r = int(base_r * (1 - t) + bg_r * t)
-            g = int(base_g * (1 - t) + bg_g * t)
-            b = int(base_b * (1 - t) + bg_b * t)
+            r = int(sr * (1 - t) + er * t)
+            g = int(sg * (1 - t) + eg * t)
+            b = int(sb * (1 - t) + eb * t)
             pygame.draw.line(surf, (r, g, b), last_screen, sp,
                              _ghost_thickness(0.5 * (last_t + t)))
             last_t = t
         last_screen = sp
 
-    _draw_trajectory_ticks(surf, camera, points, dt, PLAN_COLOR)
+    _draw_trajectory_ticks(surf, camera, points, dt,
+                           PLAN_COLOR, PLAN_COLOR_END)
 
     if impact_speed is not None:
         ip = camera.world_to_screen_int(points[-1])
@@ -1608,7 +1924,12 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              plan_apo_alt: float | None = None,
              ca_target_name: str | None = None,
              live_ca_alt: float | None = None,
-             plan_ca_alt: float | None = None) -> None:
+             plan_ca_alt: float | None = None,
+             chain_queue_size: int = 0,
+             chain_burn_count: int = 1,
+             pending_count: int = 0,
+             plan_burn_offset: float = 0.0,
+             time_scale: float = 1.0) -> None:
     if ship.alive:
         # Anchor altitude / rel-speed / v_circ to whichever landable body is
         # currently closest. As the player approaches Ember, the HUD silently
@@ -1648,7 +1969,8 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             f"Turrets:     {live_turrets}    Enemies: {live_enemies}{'' if enemies_enabled else ' (off)'}",
             f"Kills:       {kills}",
             f"Zoom:        x{zoom:.2f}    Predict: {predict_seconds:.0f}s "
-            f"({predict_target_steps} steps)",
+            f"({predict_target_steps} steps)"
+            + (f"    Time: x{time_scale:g}" if time_scale != 1.0 else ""),
             f"Peri / Apo:  {_fmt_apsis(live_peri_alt)} / {_fmt_apsis(live_apo_alt)}"
             f"    (vs {body_label})",
         ]
@@ -1669,6 +1991,12 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
                 extras.append(f"damp x{ship.brake_assist_scale:g} (Ctrl)")
             extra_str = "  " + "  ".join(extras) if extras else ""
             lines.append(f"BRAKE ASSIST: on  ({mode}){extra_str}  (cancels on W/S)")
+        if ship.path_hold:
+            n_samp = len(ship.planned_trajectory)
+            lines.append(
+                f"PATH-HOLD: on  err {ship.path_hold_error:6.1f} px"
+                f"  ({n_samp} samples)  (cancels on W/S)"
+            )
         if ship.landed:
             if ship.mining_target is not None:
                 lines.append(f"LANDED  -  refueling + MINING ({MINING_RATE:.0f}/s)")
@@ -1680,20 +2008,35 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             lines.append(">> hold B to open build menu <<")
         if paused:
             lines.append("")
-            lines.append(f"PLAN MODE  (paused)   burn {plan_burn_duration:.3f}s "
-                         f"= dv {plan_burn_dv:.1f}")
+            cur_idx = chain_queue_size + 1
+            lines.append(
+                f"PLAN MODE  (paused)   burn {cur_idx}/{chain_burn_count}: "
+                f"{plan_burn_duration:+.3f}s = dv {plan_burn_dv:+.1f}   "
+                f"fires at +{plan_burn_offset:.3f}s"
+            )
             lines.append(f"  planned peri/apo: {_fmt_apsis(plan_peri_alt)} / "
                          f"{_fmt_apsis(plan_apo_alt)}")
             if ca_target_name is not None and plan_ca_alt is not None:
                 lines.append(f"  planned closest pass:{_fmt_apsis(plan_ca_alt)}"
                              f"    (vs {ca_target_name})")
-            lines.append("  mouse aims burn   [ / ] duration  (Ctrl=0.01s, Ctrl+Shift=0.001s, Alt=0.0001s)")
-            lines.append("  Enter commit burn   Space resume without burning")
+            lines.append("  mouse aims burn   [ / ] duration   , / . fire-time"
+                         "  (Ctrl=0.01, Ctrl+Shift=0.001, Alt=0.0001)")
+            if chain_queue_size > 0:
+                lines.append(
+                    f"  N queue next ({chain_queue_size} queued)   "
+                    f"Backspace pop last   Enter fire chain   Space cancel"
+                )
+            else:
+                lines.append("  N queue this burn (chain mode)   "
+                             "Enter commit burn   Space resume without burning")
+        elif pending_count > 0:
+            lines.append("")
+            lines.append(f"CHAIN ARMED   {pending_count} burn(s) pending")
         lines += [
             "",
-            "Mouse aim  W/S/Shift/Ctrl thrust  H brake  B build",
-            "+/- zoom  0 reset zoom  / shorter * longer predict  F5/F6 halve/double steps",
-            "Space pause+plan   [ ] burn duration",
+            "Mouse aim  W/S/Shift/Ctrl thrust  H brake  J path-hold  B build",
+            "+/- zoom  0 reset zoom  / shorter * longer predict  F5/F6 steps  F7/F8 time x0.5/x2",
+            "Space pause+plan   [ ] burn duration   N queue chain   Backspace pop",
             "F11 fullscreen  R reset world  Esc quit",
         ]
         color = (220, 220, 220)
@@ -1993,9 +2336,30 @@ def main() -> None:
     fullscreen = False
     predict_seconds = PREDICT_SECONDS
     predict_target_steps = PREDICT_TARGET_STEPS
+    time_scale = TIME_SCALE_DEFAULT
 
     paused = False
     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+    # Fire-time of the *current preview* burn, as seconds from chain start
+    # (burn 0 fires at offset 0). User-controlled via , / . once the slot
+    # is active; auto-filled to (queue[-1].t_offset + predict_seconds), or
+    # 0.0 when queue is empty, every time the slot resets (entry to plan
+    # mode, after N, after Backspace). Floor enforced at queue[-1].t_offset
+    # so chain ordering stays monotonic; ceiling at PREDICT_MAX_SECONDS.
+    plan_burn_offset = 0.0
+    # Maneuver chain (built up while paused via N, fired on Enter): each
+    # entry is (angle, duration_signed, t_offset_from_chain_start). The
+    # current preview is treated as one more entry tacked onto the end at
+    # render time -- so the orange trajectory always shows the full plan.
+    maneuver_queue: list[tuple[float, float, float]] = []
+
+    def _reset_preview_offset() -> float:
+        """Auto-fill the current preview burn's fire-time when the slot
+        resets. Encapsulates the (queue tail + predict_seconds, else 0.0)
+        rule so the three reset sites stay in lockstep."""
+        if not maneuver_queue:
+            return 0.0
+        return maneuver_queue[-1][2] + predict_seconds
 
     # Wall-time accumulator for the fixed-timestep physics loop. Frames feed
     # measured wall time in; physics drains it in PHYSICS_DT chunks. Capped at
@@ -2023,8 +2387,50 @@ def main() -> None:
                     kills = 0
                     paused = False
                     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                    maneuver_queue.clear()
+                    plan_burn_offset = 0.0
+                    time_scale = TIME_SCALE_DEFAULT
                 elif event.key == pygame.K_SPACE:
+                    # Leaving plan mode without committing -> drop any
+                    # queued chain. Re-entering pause starts fresh.
+                    if paused:
+                        maneuver_queue.clear()
+                        plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
                     paused = not paused
+                    if paused:
+                        plan_burn_offset = _reset_preview_offset()
+                elif event.key == pygame.K_n and paused:
+                    # Push the current preview onto the chain at whatever
+                    # fire-time the user dialled in (plan_burn_offset).
+                    # The next preview defaults to firing AT THE SAME
+                    # offset as the just-queued burn (camera stays put,
+                    # user can dial forward with > if they want a gap).
+                    # Floor-on-, makes monotonicity automatic: once
+                    # queued, you can only move the new preview's
+                    # fire-time forward, not before the burn you just
+                    # locked in.
+                    dx = mouse_pos[0] - WIDTH / 2
+                    dy = mouse_pos[1] - HEIGHT / 2
+                    if dx * dx + dy * dy >= MOUSE_AIM_DEADZONE_SQ:
+                        burn_angle_q = math.atan2(dy, dx)
+                    else:
+                        burn_angle_q = ship.angle
+                    maneuver_queue.append(
+                        (burn_angle_q, plan_burn_duration, plan_burn_offset)
+                    )
+                    plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                    # plan_burn_offset intentionally NOT changed -- camera
+                    # stays glued to the burn point you just locked in.
+                elif event.key == pygame.K_BACKSPACE and paused:
+                    if maneuver_queue:
+                        # Pop the most-recently-added burn back into the
+                        # editable preview slot, restoring its duration AND
+                        # its fire-time so the user can retune without
+                        # losing what they had. Angle stays whatever the
+                        # mouse points to.
+                        _, popped_dur, popped_off = maneuver_queue.pop()
+                        plan_burn_duration = popped_dur
+                        plan_burn_offset = popped_off
                 elif event.key in (pygame.K_LEFTBRACKET,
                                    pygame.K_RIGHTBRACKET) and paused:
                     # Step ladder mirrors the thrust trim: plain = coarse,
@@ -2050,22 +2456,106 @@ def main() -> None:
                             PLAN_BURN_DURATION_MAX,
                             plan_burn_duration + step,
                         )
+                elif event.key in (pygame.K_COMMA, pygame.K_PERIOD) and paused:
+                    # , / .  (a.k.a. < / >) shift the current preview burn's
+                    # fire-time along the trajectory. Same precision ladder
+                    # as [ / ] -- plain / Ctrl / Ctrl+Shift / Alt = coarse
+                    # to super-fine. Floor: previous queued burn's offset
+                    # (chain stays monotonic). Ceiling: PREDICT_MAX_SECONDS.
+                    if event.mod & pygame.KMOD_ALT:
+                        step = PLAN_BURN_OFFSET_SUPERFINE_STEP
+                    elif (event.mod & pygame.KMOD_CTRL
+                            and event.mod & pygame.KMOD_SHIFT):
+                        step = PLAN_BURN_OFFSET_FINE_STEP
+                    elif event.mod & pygame.KMOD_CTRL:
+                        step = PLAN_BURN_OFFSET_PRECISION_STEP
+                    else:
+                        step = PLAN_BURN_OFFSET_STEP
+                    floor = maneuver_queue[-1][2] if maneuver_queue else 0.0
+                    if event.key == pygame.K_COMMA:
+                        plan_burn_offset = max(
+                            floor, plan_burn_offset - step
+                        )
+                    else:
+                        plan_burn_offset = min(
+                            PREDICT_MAX_SECONDS, plan_burn_offset + step
+                        )
                 elif (event.key in (pygame.K_RETURN, pygame.K_KP_ENTER)
                       and paused):
-                    # Commit the planned burn: apply the impulse the orange
-                    # trajectory shows, then unpause. Burn direction is
-                    # whatever the mouse points to right now; if the cursor
-                    # is in the dead-zone, fall back to the ship's heading.
+                    # Commit the full chain: queued burns + the current
+                    # preview as the final entry. burn 0 fires immediately
+                    # (apply_pending_maneuvers fires anything with t_apply
+                    # <= sim_time); burn k fires at sim_time + t_offset[k].
+                    # Empty queue + nonzero current preview behaves
+                    # identically to the old single-burn commit path.
                     dx = mouse_pos[0] - WIDTH / 2
                     dy = mouse_pos[1] - HEIGHT / 2
                     if dx * dx + dy * dy >= MOUSE_AIM_DEADZONE_SQ:
                         burn_angle = math.atan2(dy, dx)
                     else:
                         burn_angle = ship.angle
-                    burn_dir = Vector2(math.cos(burn_angle),
-                                       math.sin(burn_angle))
-                    if ship.commit_planned_burn(burn_dir, plan_burn_duration):
-                        paused = False
+                    chain = list(maneuver_queue) + [
+                        (burn_angle, plan_burn_duration, plan_burn_offset)
+                    ]
+                    # Drop zero-duration entries -- they'd burn no fuel and
+                    # cost nothing. A user who Backspaces back to zero is
+                    # most likely cancelling a burn; honour that.
+                    pending = []
+                    for ang, dur, off in chain:
+                        if dur == 0.0:
+                            continue
+                        bd = Vector2(math.cos(ang), math.sin(ang))
+                        pending.append((sim_time + off, bd, dur))
+                    if pending:
+                        # Snapshot the planned trajectory BEFORE applying the
+                        # kicks live, so the predictor sees the same starting
+                        # state path-hold will track from. If we're landed,
+                        # mirror the launch-pad bump that commit_planned_burn
+                        # is about to apply -- otherwise the recorded plan
+                        # would start one launch-pad-bump-height below the
+                        # actual post-commit state.
+                        if ship.landed and ship.landed_body is not None:
+                            lbody = ship.landed_body
+                            lradial = Vector2(
+                                math.cos(ship.landed_radial),
+                                math.sin(ship.landed_radial),
+                            )
+                            snap_pos = lbody.pos + lradial * (
+                                lbody.radius + LAUNCH_PAD_HEIGHT
+                            )
+                            snap_vel = Vector2(lbody.vel)
+                        else:
+                            snap_pos = Vector2(ship.pos)
+                            snap_vel = Vector2(ship.vel)
+                        chain_span = pending[-1][0] - sim_time
+                        snap_seconds = chain_span + PATH_HOLD_POSTBURN_SECONDS
+                        snap_steps = min(
+                            PREDICT_TARGET_STEPS_MAX,
+                            int(predict_target_steps
+                                * (snap_seconds / max(predict_seconds, 1e-3))),
+                        )
+                        snap_steps = max(snap_steps, predict_target_steps)
+                        snap_vels: list[Vector2] = []
+                        snap_pts, _, snap_dt = ship.predict_trajectory(
+                            bodies, sim_time, seconds=snap_seconds,
+                            pos0=snap_pos, vel0=snap_vel,
+                            target_steps=snap_steps,
+                            pending_burns=pending,
+                            out_velocities=snap_vels,
+                        )
+                        samples = [
+                            (sim_time + i * snap_dt,
+                             snap_pts[i], snap_vels[i])
+                            for i in range(min(len(snap_pts),
+                                               len(snap_vels)))
+                        ]
+                        ship.set_planned_trajectory(samples)
+                        ship.pending_maneuvers = pending
+                        ship.apply_pending_maneuvers(sim_time)
+                    maneuver_queue.clear()
+                    plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                    plan_burn_offset = 0.0
+                    paused = False
                 elif event.key == pygame.K_F5:
                     predict_target_steps = max(
                         PREDICT_TARGET_STEPS_MIN, predict_target_steps // 2
@@ -2074,6 +2564,10 @@ def main() -> None:
                     predict_target_steps = min(
                         PREDICT_TARGET_STEPS_MAX, predict_target_steps * 2
                     )
+                elif event.key == pygame.K_F7:
+                    time_scale = max(TIME_SCALE_MIN, time_scale * 0.5)
+                elif event.key == pygame.K_F8:
+                    time_scale = min(TIME_SCALE_MAX, time_scale * 2.0)
                 elif event.key == pygame.K_F10:
                     enemies_enabled = not enemies_enabled
                     if not enemies_enabled:
@@ -2082,6 +2576,8 @@ def main() -> None:
                         enemies = []
                 elif event.key == pygame.K_h:
                     ship.toggle_brake_assist()
+                elif event.key == pygame.K_j:
+                    ship.toggle_path_hold()
                 elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
                     camera.zoom = min(ZOOM_MAX, camera.zoom * ZOOM_STEP)
                 elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
@@ -2130,19 +2626,30 @@ def main() -> None:
         # body rails stay frozen too. The render block still runs and draws
         # an alternate trajectory based on the planned burn.
         if not in_build_mode and not paused:
-            # Feed measured wall time into the accumulator (capped) and run
-            # as many fixed PHYSICS_DT ticks as fit. The predictor uses the
-            # same PHYSICS_DT, so what you see is what you fly.
-            physics_accumulator = min(physics_accumulator + frame_dt,
-                                      MAX_FRAME_DT)
+            # Feed measured wall time into the accumulator (scaled by
+            # time_scale, capped at MAX_FRAME_DT) and run as many fixed
+            # PHYSICS_DT ticks as fit. The predictor uses the same
+            # PHYSICS_DT, so what you see is what you fly. F7/F8 only
+            # change how MUCH wall-time we feed per frame -- the physics
+            # step itself stays at PHYSICS_DT, which keeps the integrator
+            # bit-equivalent to the predictor regardless of time scale.
+            physics_accumulator = min(
+                physics_accumulator + frame_dt * time_scale,
+                MAX_FRAME_DT,
+            )
             while physics_accumulator >= PHYSICS_DT:
                 sim_time += PHYSICS_DT
                 update_bodies(bodies, sim_time)
 
+                # Fire any chain-scheduled burns whose time has come BEFORE
+                # ship.update so the leapfrog uses the post-burn velocity.
+                ship.apply_pending_maneuvers(sim_time)
+
                 mouse_aim_active = not build_held
                 ship.update(PHYSICS_DT, keys, mods, deposits, bodies,
                             mouse_pos=mouse_pos,
-                            mouse_aim_active=mouse_aim_active)
+                            mouse_aim_active=mouse_aim_active,
+                            sim_time=sim_time)
 
                 if enemies_enabled:
                     enemy_spawn_timer -= PHYSICS_DT
@@ -2194,8 +2701,50 @@ def main() -> None:
             # a burst of catch-up physics ticks.
             physics_accumulator = 0.0
 
-        # Camera tracks the ship in world space; zoom is independent.
-        camera.pos = Vector2(ship.pos)
+        # Camera tracks the ship in world space, except in plan-mode where
+        # it follows the planned trajectory at the current preview burn's
+        # fire-time. So pressing N or dialling , / . slides the camera to
+        # where the *next* burn will fire instead of yanking back to the
+        # ship -- you stay focused on what you're planning. With an empty
+        # queue and offset 0 this collapses to "ship's current pos" so the
+        # first burn still feels ship-anchored.
+        if (paused and ship.alive
+                and (maneuver_queue or plan_burn_offset > 1e-6)):
+            # Queued portion of the chain only -- camera target is the
+            # position JUST BEFORE the current preview burn fires.
+            cam_pending = []
+            for ang, dur, off in maneuver_queue:
+                if dur == 0.0:
+                    continue
+                bd = Vector2(math.cos(ang), math.sin(ang))
+                cam_pending.append((sim_time + off, bd, dur))
+            # Mirror the launch-pad bump from commit_planned_burn so the
+            # camera target lines up with what the orange line shows.
+            if ship.landed and ship.landed_body is not None:
+                lbody = ship.landed_body
+                lradial = Vector2(math.cos(ship.landed_radial),
+                                  math.sin(ship.landed_radial))
+                cam_pos0 = lbody.pos + lradial * (lbody.radius
+                                                  + LAUNCH_PAD_HEIGHT)
+                cam_vel0 = Vector2(lbody.vel)
+            else:
+                cam_pos0 = Vector2(ship.pos)
+                cam_vel0 = Vector2(ship.vel)
+            cam_seconds = max(plan_burn_offset, PHYSICS_DT)
+            cam_steps = min(
+                PREDICT_TARGET_STEPS_MAX,
+                max(predict_target_steps,
+                    int(cam_seconds / PHYSICS_DT)),
+            )
+            cam_pts, _, _ = ship.predict_trajectory(
+                bodies, sim_time, seconds=cam_seconds,
+                pos0=cam_pos0, vel0=cam_vel0,
+                target_steps=cam_steps,
+                pending_burns=cam_pending,
+            )
+            camera.pos = Vector2(cam_pts[-1] if cam_pts else ship.pos)
+        else:
+            camera.pos = Vector2(ship.pos)
 
         # --- Render ------------------------------------------------------
         screen.fill(BG)
@@ -2251,35 +2800,71 @@ def main() -> None:
                 )
                 draw_apsis_markers(screen, camera, traj, peri_idx, apo_idx)
 
-        # Plan-mode "what-if" overlay: same predictor, but with an instantaneous
-        # delta-v added to the ship's current velocity in the mouse-aimed direction.
+        # Plan-mode "what-if" overlay: walk the predictor through the full
+        # maneuver chain (queued burns + the current preview burn), drawing
+        # an orange trajectory with chevron markers at each scheduled burn.
         # Drawn even when landed -- planning takeoff burns is a useful case.
         plan_burn_dv = 0.0
         plan_burn_angle = ship.angle
+        # +1 for the current preview burn, even if duration is 0 (we still
+        # show "burn 1/1" in the HUD so the user knows where they are).
+        chain_burn_count = len(maneuver_queue) + 1
         if paused and ship.alive:
             dx = mouse_pos[0] - WIDTH / 2
             dy = mouse_pos[1] - HEIGHT / 2
             if dx * dx + dy * dy >= MOUSE_AIM_DEADZONE_SQ:
                 plan_burn_angle = math.atan2(dy, dx)
-            burn_dir = Vector2(math.cos(plan_burn_angle),
-                               math.sin(plan_burn_angle))
             plan_burn_dv = SHIP_THRUST * plan_burn_duration
-            # When landed, commit_planned_burn bumps to launch-pad height and
-            # applies the impulse to body.vel. Predict from the same starting
-            # state so the orange line matches what Enter actually delivers.
+            # Build the full chain: queue entries + the current preview as
+            # the final entry. The predictor receives this as pending_burns
+            # and inserts each kick at the right step. Current preview's
+            # fire-time is plan_burn_offset (user-controlled via , / .).
+            full_chain = list(maneuver_queue) + [
+                (plan_burn_angle, plan_burn_duration, plan_burn_offset)
+            ]
+            # When landed, the live commit path bumps to launch-pad height
+            # and replaces ship.vel with body.vel before applying burn 0.
+            # Mirror that here so the orange line matches what Enter
+            # actually delivers.
             if ship.landed and ship.landed_body is not None:
                 lbody = ship.landed_body
                 lradial = Vector2(math.cos(ship.landed_radial),
                                   math.sin(ship.landed_radial))
                 plan_pos0 = lbody.pos + lradial * (lbody.radius + LAUNCH_PAD_HEIGHT)
-                plan_vel0 = lbody.vel + burn_dir * plan_burn_dv
+                plan_vel0 = Vector2(lbody.vel)
             else:
                 plan_pos0 = None  # falls back to ship.pos
-                plan_vel0 = ship.vel + burn_dir * plan_burn_dv
+                plan_vel0 = Vector2(ship.vel)
+            pending = []
+            for ang, dur, off in full_chain:
+                if dur == 0.0:
+                    continue
+                bd = Vector2(math.cos(ang), math.sin(ang))
+                pending.append((sim_time + off, bd, dur))
+            # Horizon: extend past the last burn so the user can see what
+            # the chain results in. PLAN_CHAIN_LOOKAHEAD_SCALE * predict
+            # past the final burn keeps the same feel as a single-burn
+            # preview where you see ~predict_seconds beyond the burn.
+            chain_span = full_chain[-1][2] if full_chain else 0.0
+            plan_seconds = max(
+                predict_seconds,
+                chain_span + predict_seconds * PLAN_CHAIN_LOOKAHEAD_SCALE,
+            )
+            # Step budget scales with horizon so very long chains don't
+            # collapse to coarse straight lines. Cap at the same max the
+            # F5/F6 pair allows so we don't blow past the predictor's
+            # design budget on a 4-burn 5-minute chain.
+            chain_steps = min(
+                PREDICT_TARGET_STEPS_MAX,
+                int(predict_target_steps * (plan_seconds / predict_seconds)),
+            )
+            plan_burn_indices: list[int] = []
             plan_traj, plan_impact, plan_dt = ship.predict_trajectory(
-                bodies, sim_time, seconds=predict_seconds,
+                bodies, sim_time, seconds=plan_seconds,
                 pos0=plan_pos0, vel0=plan_vel0,
-                target_steps=predict_target_steps,
+                target_steps=chain_steps,
+                pending_burns=pending,
+                burn_indices=plan_burn_indices,
             )
             draw_plan_trajectory(screen, camera, plan_traj, plan_impact, plan_dt)
             plan_soi_indices = find_soi_crossings(plan_traj, sim_time, plan_dt, bodies)
@@ -2294,6 +2879,10 @@ def main() -> None:
                     plan_traj, sim_time, plan_dt, apsis_anchor
                 )
                 draw_apsis_markers(screen, camera, plan_traj, p_peri_idx, p_apo_idx)
+            # Chain burn-point chevrons sit on top so they read above the
+            # apsis dots and the orange ribbon.
+            draw_chain_burn_markers(screen, camera, plan_traj,
+                                    plan_burn_indices, font)
             # Burn-vector arrow anchored where the burn actually starts (so
             # when landed it sits at launch-pad height, not on the surface).
             arrow_origin = plan_pos0 if plan_pos0 is not None else ship.pos
@@ -2335,7 +2924,12 @@ def main() -> None:
                  live_peri_alt=live_peri_alt, live_apo_alt=live_apo_alt,
                  plan_peri_alt=plan_peri_alt, plan_apo_alt=plan_apo_alt,
                  ca_target_name=ca_target.name if ca_target is not None else None,
-                 live_ca_alt=live_ca_alt, plan_ca_alt=plan_ca_alt)
+                 live_ca_alt=live_ca_alt, plan_ca_alt=plan_ca_alt,
+                 chain_queue_size=len(maneuver_queue),
+                 chain_burn_count=chain_burn_count,
+                 pending_count=len(ship.pending_maneuvers),
+                 plan_burn_offset=plan_burn_offset,
+                 time_scale=time_scale)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)

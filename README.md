@@ -106,10 +106,12 @@ into a navigation instrument rather than just a pretty line:
 - **Impact dot at the line's end** (green = soft, red = hard): if your
   trajectory hits something within the prediction window, this is where
   and how. Soft = within `LAND_SPEED_MAX` (35 px/s) relative to the body.
-- **Line fade and thickening**: the chaos cone. Even with bit-faithful
+- **Colour shift and thickening**: the chaos cone. Even with bit-faithful
   integration, a 3-body trajectory's true position diverges exponentially
-  with horizon. The line fades toward background and thickens to keep
-  you honest about how far ahead is "trustworthy."
+  with horizon. The line gradients from cool blue at the ship to bright
+  red at the horizon — full brightness throughout, so the tip stays
+  readable against the background — and thickens to keep you honest
+  about how far ahead is "trustworthy."
 
 The plan-mode (orange) line gets the same annotations, so trimming a
 Hohmann is "step `]` until the orange diamond touches your target"
@@ -362,8 +364,10 @@ is better than relying on the cancel ordering.
   other)
 - Landed: green ring around ship
 - Brake-assist on: cyan ring around ship
-- Trajectory line: blue → fading-to-background gradient with stride 6;
-  thickness ramps 1→3 px with horizon as a "chaos cone" cue
+- Trajectory line: blue → bright red gradient with stride 6 (no
+  brightness fade — tip stays visible against the BG); thickness ramps
+  1→3 px with horizon as a "chaos cone" cue. Plan-mode counterpart is
+  the same shape, orange → bright red.
 - Trajectory tick marks: perpendicular line every 5 s, screen-space length
   so they stay constant pixels at any zoom
 - Trajectory impact marker: green dot if soft (within `LAND_SPEED_MAX`),
