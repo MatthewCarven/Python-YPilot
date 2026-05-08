@@ -313,7 +313,7 @@ SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 # Duration is signed: stepping below 0 flips the impulse vector, equivalent
 # to pointing the cursor 180° opposite. Lets you A/B forward vs. retro burns
 # from the same aim point (with [ / ] alone) instead of spinning the mouse.
-PLAN_BURN_DURATION_DEFAULT = 1.0
+PLAN_BURN_DURATION_DEFAULT = 0.1
 PLAN_BURN_DURATION_MAX = 10.0
 PLAN_BURN_DURATION_MIN = -PLAN_BURN_DURATION_MAX  # symmetric: negative = retro
 PLAN_BURN_DURATION_STEP = 0.1               # plain [ / ]
