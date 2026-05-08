@@ -204,15 +204,15 @@ evaporates and the line straightens for that segment automatically.
 You don't have to re-enter plan mode to see what you set up.
 
 **Extending a committed chain.** Press Space again with burns still
-pending and plan mode reopens with the new preview's fire-time
-auto-anchored past the last scheduled burn — exactly the same "queue
-tail + predict_seconds" rule that governs N-queueing. Press Enter to
-add the new burn(s); the integrator merges the new chain with the
-existing pending one (sorted by apply-time) so previously-armed
-burns aren't wiped out. You can also dial `,` *backwards* below an
-existing burn's apply-time to interleave a corrective burn before
-something you've already scheduled — the floor stays at 0 by design,
-on the principle that physics deserves second chances.
+pending and plan mode reopens; the new preview starts back at the
+ship (fire-time 0). Use `Shift + ,` / `Shift + .` (1-second leap)
+to push the fire-time past the existing pending burns — or anywhere
+else you want. Press Enter to add the new burn(s); the integrator
+merges the new chain with the existing pending one (sorted by
+apply-time) so previously-armed burns aren't wiped out. The `,`
+floor stays at 0 by design, so you can also schedule a *corrective*
+burn that fires before an already-armed burn — physics deserves
+second chances.
 
 ## Recording
 

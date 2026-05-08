@@ -2423,27 +2423,27 @@ def main() -> None:
 
     def _reset_preview_offset() -> float:
         """Auto-fill the current preview burn's fire-time when the slot
-        resets.
+        resets. Currently triggered only on plan-mode entry, where
+        maneuver_queue is always empty (cleared on every prior exit
+        path), so this returns 0.0 in practice. The maneuver_queue
+        branch is kept defensively for any future caller that might
+        reset the slot mid-planning.
 
-        Priority order:
-          1. If an in-progress maneuver_queue exists (mid-planning, before
-             commit), anchor to its tail + predict_seconds. Existing
-             behaviour: queueing burn N+1 starts after burn N.
-          2. Else if a committed chain is still pending on the ship
-             (re-entering plan mode after Enter), anchor to the *last*
-             pending burn's apply-time (relative to sim_time) +
-             predict_seconds. This makes re-entry feel like extending
-             the existing chain rather than starting a competing burn
-             before it. Burns that have already fired have been popped
-             from pending_maneuvers, so the anchor naturally shifts
-             forward as the chain consumes.
-          3. Else 0.0 (fresh plan, no scheduled burns).
+        Important: even when a chain is committed and pending on the
+        ship, we deliberately start the new preview at offset 0 (back
+        at the ship), NOT auto-anchored past the last pending burn.
+        An earlier version of this function did the auto-anchor and
+        it caused the camera-follow path (which kicks in whenever
+        plan_burn_offset > 0) to predict over a horizon stretching
+        to the last pending burn's apply-time on the very first frame
+        after Space, tanking the framerate when a long chain was
+        pending. Players who want to extend the chain can dial
+        forward with Shift+, / Shift+. (1-second leap) or any of the
+        finer modifiers; commit will still merge with the existing
+        pending burns by apply-time.
         """
         if maneuver_queue:
             return maneuver_queue[-1][2] + predict_seconds
-        if ship.pending_maneuvers:
-            last_apply = max(t for t, _, _ in ship.pending_maneuvers)
-            return max(0.0, last_apply - sim_time) + predict_seconds
         return 0.0
 
     # Wall-time accumulator for the fixed-timestep physics loop. Frames feed
