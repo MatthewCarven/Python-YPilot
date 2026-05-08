@@ -573,10 +573,16 @@ def shortest_angle_diff(target: float, current: float) -> float:
 
 
 def nearest_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
-    """Closest landable body to `pos`, or None if there isn't one in scene.
+    """Closest landable body to `pos` by center-to-center distance, or None
+    if there isn't one in scene. The sun is not a viable landing target so
+    it's filtered out.
 
-    Used by the brake-assist autopilot so it matches velocity to whatever
-    you're actually flying toward (the sun is not a viable landing target).
+    NOTE: For "which body am I really orbiting", prefer `dominant_landable`
+    -- a Moon swinging past Planet can be geometrically nearer to a high-
+    orbit ship than Planet itself, yet Planet's gravity still dominates.
+    Geometric nearness is fine for "where will the ship spawn enemies"
+    or "what body is the trajectory's closest-approach marker pointing
+    at", but wrong for hover-hold target selection.
     """
     best = None
     best_d2 = float("inf")
@@ -586,6 +592,36 @@ def nearest_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
         d2 = (b.pos - pos).length_squared()
         if d2 < best_d2:
             best_d2 = d2
+            best = b
+    return best
+
+
+def dominant_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
+    """Landable body whose gravity dominates at `pos` (highest mu/r^2).
+
+    Use instead of `nearest_landable` when you want "which body am I really
+    orbiting" rather than "which body's center is geometrically closest".
+    A Moon swinging past Planet can be geometrically nearer to a high-
+    orbit ship than Planet itself, yet Planet's gravity still dominates --
+    so brake-assist matching the Moon's velocity in that moment would be
+    wrong. mu/r^2 picks the physically correct answer; the brake-assist
+    target only switches over when the ship is genuinely inside the
+    Moon's sphere of influence.
+
+    Mirrors the dominant-body concept used by `find_soi_crossings` for
+    SOI markers on the predicted trajectory, just filtered to landables.
+    """
+    best = None
+    best_g = 0.0
+    for b in bodies:
+        if not b.landable:
+            continue
+        d2 = (b.pos - pos).length_squared()
+        if d2 < 1e-3:
+            continue
+        g = b.mu / d2
+        if g > best_g:
+            best_g = g
             best = b
     return best
 
@@ -1294,7 +1330,11 @@ class Ship:
         if not self.brake_assist:
             return Vector2(0.0, 0.0)
 
-        target = nearest_landable(pos, bodies)
+        # Use mu/r^2 dominance, not geometric nearness: a Moon swinging
+        # past Planet can be geometrically closer to a high-orbit ship
+        # than Planet itself but is NOT the body the ship is orbiting.
+        # See dominant_landable for the full reasoning.
+        target = dominant_landable(pos, bodies)
         if target is not None:
             rel_vel = vel - target.vel
             if self.hover_hold:
