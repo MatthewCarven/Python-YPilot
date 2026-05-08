@@ -2423,11 +2423,28 @@ def main() -> None:
 
     def _reset_preview_offset() -> float:
         """Auto-fill the current preview burn's fire-time when the slot
-        resets. Encapsulates the (queue tail + predict_seconds, else 0.0)
-        rule so the three reset sites stay in lockstep."""
-        if not maneuver_queue:
-            return 0.0
-        return maneuver_queue[-1][2] + predict_seconds
+        resets.
+
+        Priority order:
+          1. If an in-progress maneuver_queue exists (mid-planning, before
+             commit), anchor to its tail + predict_seconds. Existing
+             behaviour: queueing burn N+1 starts after burn N.
+          2. Else if a committed chain is still pending on the ship
+             (re-entering plan mode after Enter), anchor to the *last*
+             pending burn's apply-time (relative to sim_time) +
+             predict_seconds. This makes re-entry feel like extending
+             the existing chain rather than starting a competing burn
+             before it. Burns that have already fired have been popped
+             from pending_maneuvers, so the anchor naturally shifts
+             forward as the chain consumes.
+          3. Else 0.0 (fresh plan, no scheduled burns).
+        """
+        if maneuver_queue:
+            return maneuver_queue[-1][2] + predict_seconds
+        if ship.pending_maneuvers:
+            last_apply = max(t for t, _, _ in ship.pending_maneuvers)
+            return max(0.0, last_apply - sim_time) + predict_seconds
+        return 0.0
 
     # Wall-time accumulator for the fixed-timestep physics loop. Frames feed
     # measured wall time in; physics drains it in PHYSICS_DT chunks. Capped at
@@ -2584,6 +2601,21 @@ def main() -> None:
                         bd = Vector2(math.cos(ang), math.sin(ang))
                         pending.append((sim_time + off, bd, dur))
                     if pending:
+                        # Merge with any already-committed chain so that
+                        # re-entering plan mode and adding a burn extends
+                        # the schedule instead of replacing it. Sort by
+                        # apply-time so the predictor's sequential walk
+                        # over pending_burns sees a monotonic time series
+                        # even when the player backdated the new preview's
+                        # fire-time below the existing pending burns. The
+                        # `,` floor stays at 0 on purpose -- per design,
+                        # the player can sneak a corrective burn in
+                        # *before* an already-scheduled burn (e.g. for
+                        # a near-miss they spotted after committing).
+                        merged = sorted(
+                            list(ship.pending_maneuvers) + pending,
+                            key=lambda mv: mv[0],
+                        )
                         # Snapshot the planned trajectory BEFORE applying the
                         # kicks live, so the predictor sees the same starting
                         # state path-hold will track from. If we're landed,
@@ -2604,7 +2636,10 @@ def main() -> None:
                         else:
                             snap_pos = Vector2(ship.pos)
                             snap_vel = Vector2(ship.vel)
-                        chain_span = pending[-1][0] - sim_time
+                        # Span runs to the *latest* burn in the merged list,
+                        # which may be either an already-pending burn or one
+                        # of the newly added ones depending on insertion order.
+                        chain_span = merged[-1][0] - sim_time
                         snap_seconds = chain_span + PATH_HOLD_POSTBURN_SECONDS
                         snap_steps = min(
                             PREDICT_TARGET_STEPS_MAX,
@@ -2617,7 +2652,7 @@ def main() -> None:
                             bodies, sim_time, seconds=snap_seconds,
                             pos0=snap_pos, vel0=snap_vel,
                             target_steps=snap_steps,
-                            pending_burns=pending,
+                            pending_burns=merged,
                             out_velocities=snap_vels,
                         )
                         samples = [
@@ -2627,7 +2662,7 @@ def main() -> None:
                                                len(snap_vels)))
                         ]
                         ship.set_planned_trajectory(samples)
-                        ship.pending_maneuvers = pending
+                        ship.pending_maneuvers = merged
                         ship.apply_pending_maneuvers(sim_time)
                     maneuver_queue.clear()
                     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
