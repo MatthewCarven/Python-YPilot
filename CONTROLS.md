@@ -196,6 +196,13 @@ After commit, the predicted trajectory is snapshotted (extended past the
 last burn by `PATH_HOLD_POSTBURN_SECONDS = 60 s`) and stored on the
 ship — ready for **J** to engage path-hold against it.
 
+The **cyan predicted line** also folds the committed chain in: it now
+shows the trajectory the ship will *actually* fly post-burns, with
+chevrons at each scheduled burn point and the predict horizon extended
+to reach past the final burn. As each burn fires, its chevron
+evaporates and the line straightens for that segment automatically.
+You don't have to re-enter plan mode to see what you set up.
+
 ## Recording
 
 | Input | Effect |

@@ -2857,9 +2857,38 @@ def main() -> None:
         plan_ca_alt: float | None = None
 
         if ship.alive and not ship.landed and not in_build_mode:
+            # Fold any committed maneuver chain (ship.pending_maneuvers)
+            # into the cyan predict so the line shows the trajectory the
+            # ship will *actually* fly post-burns, with chevrons stamped
+            # at each scheduled burn point. As burns fire and pop from
+            # pending_maneuvers, their chevron evaporates and the line
+            # straightens for that segment on the next frame -- no
+            # separate "armed overlay" needed.
+            #
+            # Horizon extends past the last burn so the user can see what
+            # the chain results in, mirroring plan-mode's PLAN_CHAIN_
+            # LOOKAHEAD_SCALE behaviour. Step budget scales with horizon
+            # so a long chain doesn't collapse to a coarse line.
+            if ship.pending_maneuvers:
+                last_apply = max(t for t, _, _ in ship.pending_maneuvers)
+                live_chain_span = max(0.0, last_apply - sim_time)
+                live_seconds = max(
+                    predict_seconds,
+                    live_chain_span + predict_seconds * PLAN_CHAIN_LOOKAHEAD_SCALE,
+                )
+                live_steps = min(
+                    PREDICT_TARGET_STEPS_MAX,
+                    int(predict_target_steps * (live_seconds / predict_seconds)),
+                )
+            else:
+                live_seconds = predict_seconds
+                live_steps = predict_target_steps
+            live_burn_indices: list[int] = []
             traj, impact_speed, traj_dt = ship.predict_trajectory(
-                bodies, sim_time, seconds=predict_seconds,
-                target_steps=predict_target_steps,
+                bodies, sim_time, seconds=live_seconds,
+                target_steps=live_steps,
+                pending_burns=ship.pending_maneuvers,
+                burn_indices=live_burn_indices,
             )
             draw_trajectory(screen, camera, traj, impact_speed, traj_dt)
             # Stack annotation layers under-to-over so the most actionable
@@ -2876,6 +2905,11 @@ def main() -> None:
                     traj, sim_time, traj_dt, apsis_anchor
                 )
                 draw_apsis_markers(screen, camera, traj, peri_idx, apo_idx)
+            # Chevrons last so they sit above the predicted line and apsis
+            # dots -- same layering as plan-mode chain rendering. No-op
+            # when live_burn_indices is empty (nothing committed).
+            draw_chain_burn_markers(screen, camera, traj,
+                                    live_burn_indices, font)
 
         # Plan-mode "what-if" overlay: walk the predictor through the full
         # maneuver chain (queued burns + the current preview burn), drawing
