@@ -303,6 +303,12 @@ PREDICT_STEP = 1.5               # multiplicative step per `/` or `*` press
 PREDICT_TARGET_STEPS = 6400      # cap total steps so 5min predictions stay cheap
 PREDICT_TARGET_STEPS_MIN = 100   # F5 halve floor: very coarse but legal
 PREDICT_TARGET_STEPS_MAX = 102400  # F6 double ceiling: past PHYSICS_DT clamp
+PREDICT_CACHE_INTERVAL = 3  # frames between cyan-predict refreshes when
+# running. Set to 1 to disable caching (refresh every frame). The cyan
+# trajectory's start point lags the ship by up to (N-1) frames of motion
+# during refresh windows -- ~5 px at default time scale -- which is the
+# perf trade-off for amortizing the predict cost. When paused, ship
+# state is invariant so the cache stays exact regardless of interval.
 PREDICT_DRAW_STRIDE = 6
 PREDICT_TICK_INTERVAL = 5.0      # seconds between perpendicular tick marks
 PREDICT_TICK_HALFLEN = 5         # tick half-length, screen-space pixels
@@ -2451,6 +2457,28 @@ def main() -> None:
     # MAX_FRAME_DT so a stall doesn't cause a burst of catch-up steps.
     physics_accumulator = 0.0
 
+    # Cyan-predict cache: amortizes the predict + apsides + SOI + closest-
+    # approach analysis across PREDICT_CACHE_INTERVAL frames. Refresh is
+    # forced whenever the cached state diverges from current (paused
+    # toggle, pending-burn count change, predict horizon change, anchor
+    # body change). Initial age == INTERVAL forces a refresh on frame 1.
+    predict_cache: dict = {
+        "age": PREDICT_CACHE_INTERVAL,
+        "paused": None,
+        "pending_count": -1,
+        "predict_seconds": -1.0,
+        "predict_target_steps": -1,
+        "apsis_anchor_id": None,
+        "ca_target_id": None,
+        "traj": [],
+        "impact_speed": None,
+        "traj_dt": 0.0,
+        "burn_indices": [],
+        "soi_indices": [],
+        "peri_idx": None, "apo_idx": None, "ca_idx": None,
+        "peri_alt": None, "apo_alt": None, "ca_alt": None,
+    }
+
     running = True
     while running:
         frame_dt = clock.tick(FPS) / 1000.0
@@ -2892,59 +2920,124 @@ def main() -> None:
         plan_ca_alt: float | None = None
 
         if ship.alive and not ship.landed and not in_build_mode:
-            # Fold any committed maneuver chain (ship.pending_maneuvers)
-            # into the cyan predict so the line shows the trajectory the
-            # ship will *actually* fly post-burns, with chevrons stamped
-            # at each scheduled burn point. As burns fire and pop from
-            # pending_maneuvers, their chevron evaporates and the line
-            # straightens for that segment on the next frame -- no
-            # separate "armed overlay" needed.
-            #
-            # Horizon extends past the last burn so the user can see what
-            # the chain results in, mirroring plan-mode's PLAN_CHAIN_
-            # LOOKAHEAD_SCALE behaviour. Step budget scales with horizon
-            # so a long chain doesn't collapse to a coarse line.
-            if ship.pending_maneuvers:
-                last_apply = max(t for t, _, _ in ship.pending_maneuvers)
-                live_chain_span = max(0.0, last_apply - sim_time)
-                live_seconds = max(
-                    predict_seconds,
-                    live_chain_span + predict_seconds * PLAN_CHAIN_LOOKAHEAD_SCALE,
-                )
-                live_steps = min(
-                    PREDICT_TARGET_STEPS_MAX,
-                    int(predict_target_steps * (live_seconds / predict_seconds)),
-                )
-            else:
-                live_seconds = predict_seconds
-                live_steps = predict_target_steps
-            live_burn_indices: list[int] = []
-            traj, impact_speed, traj_dt = ship.predict_trajectory(
-                bodies, sim_time, seconds=live_seconds,
-                target_steps=live_steps,
-                pending_burns=ship.pending_maneuvers,
-                burn_indices=live_burn_indices,
+            # Decide whether to refresh the cyan-predict cache or replay
+            # the previous frame's result. Refresh whenever:
+            #   - cache aged past PREDICT_CACHE_INTERVAL frames
+            #   - paused toggled (sim went still or resumed)
+            #   - pending burn count changed (a burn fired or chain
+            #     was extended via plan-mode commit)
+            #   - predict horizon / step budget mutated (/, *, F5, F6)
+            #   - apsis or closest-approach anchor body changed
+            # When paused, ship state is invariant so the cache stays
+            # exact across as many replay frames as we like; the
+            # interval-based refresh only matters while running.
+            pending_count_now = len(ship.pending_maneuvers)
+            apsis_anchor_id = id(apsis_anchor)
+            ca_target_id = id(ca_target)
+            refresh = (
+                predict_cache["age"] >= PREDICT_CACHE_INTERVAL
+                or predict_cache["paused"] != paused
+                or predict_cache["pending_count"] != pending_count_now
+                or predict_cache["predict_seconds"] != predict_seconds
+                or predict_cache["predict_target_steps"] != predict_target_steps
+                or predict_cache["apsis_anchor_id"] != apsis_anchor_id
+                or predict_cache["ca_target_id"] != ca_target_id
             )
-            draw_trajectory(screen, camera, traj, impact_speed, traj_dt)
-            # Stack annotation layers under-to-over so the most actionable
-            # markers (apsides + prograde arrows) sit on top.
-            soi_indices = find_soi_crossings(traj, sim_time, traj_dt, bodies)
-            draw_soi_markers(screen, camera, traj, soi_indices)
-            if ca_target is not None:
-                ca_idx, live_ca_alt = find_closest_approach(
-                    traj, sim_time, traj_dt, ca_target
+            if refresh:
+                # Fold any committed maneuver chain (ship.pending_maneuvers)
+                # into the cyan predict so the line shows the trajectory the
+                # ship will *actually* fly post-burns, with chevrons stamped
+                # at each scheduled burn point. As burns fire and pop from
+                # pending_maneuvers, their chevron evaporates and the line
+                # straightens for that segment on the next refresh -- no
+                # separate "armed overlay" needed.
+                #
+                # Horizon extends past the last burn so the user can see what
+                # the chain results in, mirroring plan-mode's PLAN_CHAIN_
+                # LOOKAHEAD_SCALE behaviour. Step budget scales with horizon
+                # so a long chain doesn't collapse to a coarse line.
+                if ship.pending_maneuvers:
+                    last_apply = max(t for t, _, _ in ship.pending_maneuvers)
+                    live_chain_span = max(0.0, last_apply - sim_time)
+                    live_seconds = max(
+                        predict_seconds,
+                        live_chain_span + predict_seconds * PLAN_CHAIN_LOOKAHEAD_SCALE,
+                    )
+                    live_steps = min(
+                        PREDICT_TARGET_STEPS_MAX,
+                        int(predict_target_steps * (live_seconds / predict_seconds)),
+                    )
+                else:
+                    live_seconds = predict_seconds
+                    live_steps = predict_target_steps
+                live_burn_indices: list[int] = []
+                traj, impact_speed, traj_dt = ship.predict_trajectory(
+                    bodies, sim_time, seconds=live_seconds,
+                    target_steps=live_steps,
+                    pending_burns=ship.pending_maneuvers,
+                    burn_indices=live_burn_indices,
                 )
-                draw_closest_approach_marker(screen, camera, traj, ca_idx)
-            if apsis_anchor is not None:
-                peri_idx, apo_idx, live_peri_alt, live_apo_alt = find_apsides(
-                    traj, sim_time, traj_dt, apsis_anchor
-                )
-                draw_apsis_markers(screen, camera, traj, peri_idx, apo_idx)
-            # Chevrons last so they sit above the predicted line and apsis
-            # dots -- same layering as plan-mode chain rendering. No-op
-            # when live_burn_indices is empty (nothing committed).
-            draw_chain_burn_markers(screen, camera, traj,
-                                    live_burn_indices, font)
+                soi_indices = find_soi_crossings(traj, sim_time, traj_dt, bodies)
+                ca_idx: int | None = None
+                if ca_target is not None:
+                    ca_idx, live_ca_alt = find_closest_approach(
+                        traj, sim_time, traj_dt, ca_target
+                    )
+                peri_idx: int | None = None
+                apo_idx: int | None = None
+                if apsis_anchor is not None:
+                    peri_idx, apo_idx, live_peri_alt, live_apo_alt = find_apsides(
+                        traj, sim_time, traj_dt, apsis_anchor
+                    )
+                predict_cache.update({
+                    "age": 0,
+                    "paused": paused,
+                    "pending_count": pending_count_now,
+                    "predict_seconds": predict_seconds,
+                    "predict_target_steps": predict_target_steps,
+                    "apsis_anchor_id": apsis_anchor_id,
+                    "ca_target_id": ca_target_id,
+                    "traj": traj,
+                    "impact_speed": impact_speed,
+                    "traj_dt": traj_dt,
+                    "burn_indices": live_burn_indices,
+                    "soi_indices": soi_indices,
+                    "peri_idx": peri_idx,
+                    "apo_idx": apo_idx,
+                    "ca_idx": ca_idx,
+                    "peri_alt": live_peri_alt,
+                    "apo_alt": live_apo_alt,
+                    "ca_alt": live_ca_alt,
+                })
+            else:
+                predict_cache["age"] += 1
+                # Replay HUD readouts from cache so the altitude / closest-
+                # approach numbers stay populated on non-refresh frames.
+                live_peri_alt = predict_cache["peri_alt"]
+                live_apo_alt = predict_cache["apo_alt"]
+                live_ca_alt = predict_cache["ca_alt"]
+
+            # Render from cache (whether just-refreshed or replayed). The
+            # marker draw functions handle None idx / empty indices as
+            # no-ops, so this works uniformly.
+            cached_traj = predict_cache["traj"]
+            if cached_traj:
+                draw_trajectory(screen, camera, cached_traj,
+                                predict_cache["impact_speed"],
+                                predict_cache["traj_dt"])
+                # Stack annotation layers under-to-over so the most
+                # actionable markers (apsides + prograde arrows) sit on top.
+                draw_soi_markers(screen, camera, cached_traj,
+                                 predict_cache["soi_indices"])
+                draw_closest_approach_marker(screen, camera, cached_traj,
+                                             predict_cache["ca_idx"])
+                draw_apsis_markers(screen, camera, cached_traj,
+                                   predict_cache["peri_idx"],
+                                   predict_cache["apo_idx"])
+                # Chevrons last so they sit above the predicted line and
+                # apsis dots. No-op when burn_indices is empty.
+                draw_chain_burn_markers(screen, camera, cached_traj,
+                                        predict_cache["burn_indices"], font)
 
         # Plan-mode "what-if" overlay: walk the predictor through the full
         # maneuver chain (queued burns + the current preview burn), drawing
