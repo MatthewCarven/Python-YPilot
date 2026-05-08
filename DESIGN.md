@@ -192,14 +192,63 @@ The snapshot extends past the last burn by
 to *after* the chain finishes — otherwise it would auto-disengage the
 moment the last burn fired.
 
+### Live cyan = post-burn trajectory
+
+The cyan predict line that runs every frame folds
+`ship.pending_maneuvers` into its prediction, so the line shows the
+trajectory the ship *will* fly post-burns rather than a counterfactual
+"if I don't burn" path. Chevrons are drawn at each scheduled burn
+point; as burns fire and pop from `pending_maneuvers`, the
+corresponding chevron evaporates and the line straightens for that
+segment automatically. The horizon stretches past the last pending
+burn using `PLAN_CHAIN_LOOKAHEAD_SCALE` so the user can see what the
+chain results in.
+
+Apsides, closest-approach marker, and SOI crossings annotate this
+post-burn trajectory, so after committing a Hohmann insertion the
+peri/apo dots immediately reflect the *resulting* orbit, not the
+pre-burn ellipse.
+
+### Predict cache
+
+The full cyan pipeline (`predict_trajectory` + `find_apsides` +
+`find_soi_crossings` + `find_closest_approach`) is amortized across
+`PREDICT_CACHE_INTERVAL = 3` frames. The cache invalidates whenever:
+
+- `paused` toggles (sim went still or resumed),
+- the pending burn count changes (a burn fired or the chain was
+  extended via plan-mode commit),
+- `predict_seconds` or `predict_target_steps` mutates (`/`, `*`, F5,
+  F6),
+- the apsis or closest-approach anchor body changes.
+
+When paused, ship state is invariant so the cache stays exact across
+arbitrary replay frames; the periodic refresh only matters while
+running. The trade-off when running is that the rendered trajectory's
+*start* lags the ship by up to (N − 1) frames of motion (~5 px at
+default time scale). Set `PREDICT_CACHE_INTERVAL = 1` to disable
+caching entirely.
+
 ## Brake-assist autopilot
 
 `Ship._brake_assist_accel(pos, vel, bodies)` returns the desired
 corrective acceleration. Behaviour:
 
 - **Default mode** — drive `vel - target.vel` toward zero, where
-  `target` is the nearest landable body. "Stop" really means "match
-  the planet"; landings on a moving body just work.
+  `target` is the landable body the ship was geometrically closest
+  to *at the moment H was pressed* (`nearest_landable(pos, bodies)`).
+  "Stop" really means "match the planet"; landings on a moving body
+  just work.
+- **Sticky-on-engage targeting** — `target` is latched on the first
+  frame after toggle and held until brake-assist disengages. Solves
+  two things at once: a Moon swooping past a Planet orbit no longer
+  lurches hover (target stays on Planet because that's what was
+  closest at engage), and Moon landings work normally (fly close,
+  press H, target latches on Moon). Retargeting is explicit: tap H
+  off, tap H on. Picks geometric nearness rather than mu/r²
+  dominance because the dominance threshold for the Moon is a
+  ~31 px shell above its surface — too tight for a workable
+  approach window.
 - **Hover-hold (Shift)** — kill only the *radial* component of relative
   velocity. Altitude locks while tangential drift continues. Useful
   for setting up an approach over a build pad.
@@ -402,6 +451,7 @@ tweaked by feel:
 | `PREDICT_TARGET_STEPS` | 6400 | Predictor step-cap default (F5/F6 mutate at runtime) |
 | `PREDICT_TARGET_STEPS_MIN` | 100 | F5 floor — coarse but legal |
 | `PREDICT_TARGET_STEPS_MAX` | 102 400 | F6 ceiling — past `PHYSICS_DT` clamp |
+| `PREDICT_CACHE_INTERVAL` | 3 | Frames between cyan-predict refreshes when running. 1 = no caching. |
 | `PREDICT_TICK_INTERVAL` | 5.0 s | Seconds between perpendicular tick marks |
 | `PREDICT_TICK_HALFLEN` | 5 px | Tick half-length, screen-space (zoom-invariant) |
 | `TIME_SCALE_MIN/MAX` | 1/16 / 16 | F7/F8 clamps |
@@ -423,10 +473,12 @@ tweaked by feel:
 - **Fuel consumption scales with thrust magnitude.** 5× boost burns 5×
   as fast. Brake-assist and path-hold draw fuel proportional to their
   current corrective acceleration.
-- **Brake-assist matches the velocity of the nearest landable body**
-  rather than zeroing absolute world velocity. This is the difference
-  between "stop" (drift away from a moving planet) and "match" (settle
-  onto it).
+- **Brake-assist matches the velocity of a landable body** (latched at
+  H-press time) rather than zeroing absolute world velocity. This is
+  the difference between "stop" (drift away from a moving planet) and
+  "match" (settle onto it). Target is sticky-on-engage, not
+  recomputed per frame, so a Moon flyby doesn't yank the autopilot
+  off Planet mid-hover.
 - **Strafe (Q/E) doesn't cancel autopilot.** Forward (W) and retro (S)
   are "I'm taking control" gestures; strafe is "nudge while autopilot
   holds position". Combining strafe + hover-hold over a build pad is

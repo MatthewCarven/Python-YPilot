@@ -98,14 +98,15 @@ Controls:
                        burn without re-planning from scratch.
     F9                 toggle video recording. Pipes raw frames to ffmpeg
                        (must be on PATH) and writes a timestamped .mp4
-                       next to ypilot.py. 30fps H.264/yuv420p output paced
-                       against wall-clock -- a 500ms stutter shows as a
-                       500ms freeze in the recording, not as sped-up
-                       footage. Encode runs on a worker thread so the
-                       game loop never blocks. HUD shows REC + frame
-                       counts while active.
+                       into ./captures/ (created if missing). 30fps
+                       H.264/yuv420p output paced against wall-clock --
+                       a 500ms stutter shows as a 500ms freeze in the
+                       recording, not as sped-up footage. Encode runs
+                       on a worker thread so the game loop never
+                       blocks. HUD shows REC + frame counts while active.
     F11                toggle fullscreen
-    F12                save screenshot (PNG) next to ypilot.py
+    F12                save screenshot (PNG) into ./captures/ (created
+                       if missing)
     R                  reset world
     Esc                quit
 
@@ -2743,13 +2744,21 @@ def main() -> None:
                         WIDTH, HEIGHT = new_w, new_h
                 elif event.key == pygame.K_F12:
                     stamp = datetime.datetime.now().strftime("%Y-%m-%d - %H-%M-%S")
-                    out_dir = os.path.dirname(os.path.abspath(__file__))
+                    out_dir = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        "captures",
+                    )
+                    os.makedirs(out_dir, exist_ok=True)
                     pygame.image.save(screen, os.path.join(out_dir, f"{stamp}.png"))
                 elif event.key == pygame.K_F9:
                     if recorder.recording:
                         recorder.stop()
                     else:
-                        out_dir = os.path.dirname(os.path.abspath(__file__))
+                        out_dir = os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "captures",
+                        )
+                        os.makedirs(out_dir, exist_ok=True)
                         recorder.start(screen.get_size(), out_dir)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_clicked = True

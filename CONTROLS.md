@@ -218,7 +218,7 @@ second chances.
 
 | Input | Effect |
 |---|---|
-| **F9** | Toggle video recording. Pipes raw RGB frames to ffmpeg (must be on PATH — `winget install ffmpeg` / `brew install ffmpeg`) and writes a timestamped `.mp4` next to `ypilot.py`. |
+| **F9** | Toggle video recording. Pipes raw RGB frames to ffmpeg (must be on PATH — `winget install ffmpeg` / `brew install ffmpeg`) and writes a timestamped `.mp4` into `./captures/` (created if missing). |
 
 Output is 30 fps H.264 / yuv420p, paced against wall-clock. When the game
 stutters, the recorder dwells on the previous frame for the right number
@@ -238,7 +238,7 @@ want it.
 |---|---|
 | **F10** | Toggle enemy spawns. Also clears any in scene. |
 | **F11** | Toggle fullscreen. |
-| **F12** | Save a screenshot (PNG) next to `ypilot.py`. |
+| **F12** | Save a screenshot (PNG) into `./captures/` (created if missing). |
 | **R** | Reset world. |
 | **Esc** | Quit. |
 

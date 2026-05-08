@@ -26,3 +26,6 @@ ENV/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Screenshot / video output (F12 / F9)
+captures/
