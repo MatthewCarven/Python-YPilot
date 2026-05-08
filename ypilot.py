@@ -175,8 +175,9 @@ PLANET_ORBIT_RADIUS = 800.0
 PLANET_INITIAL_PHASE = 0.0
 
 # --- Planet 2: Ember (outer wilderness) ------------------------------------
-# Heavier, larger, slower, and rust-coloured. No deposits or build pads --
-# pure destination for now. Hohmann transfer from PLANET orbit takes ~52s.
+# Heavier, larger, slower, and rust-coloured. Carries forward-base build pads
+# but no ore -- you have to haul ore in from elsewhere to fortify here.
+# Hohmann transfer from PLANET orbit takes ~52s.
 PLANET2_NAME = "Ember"
 PLANET2_RADIUS = 110.0
 PLANET2_MU = 6_000_000.0
@@ -184,6 +185,22 @@ PLANET2_COLOR = (200, 100, 70)
 PLANET2_RIM = (140, 60, 40)
 PLANET2_ORBIT_RADIUS = 1800.0
 PLANET2_INITIAL_PHASE = math.pi * 0.6
+
+# --- Planet 3: Frostbite (the ore world) -----------------------------------
+# Pale, distant, lower gravity. The ore-rich destination -- Planet only has
+# enough deposits for a starter turret or two, the bulk lives out here.
+# Hohmann transfer from PLANET orbit takes ~92s; from Ember ~146s. The round
+# trip is the whole point: you commit to a real expedition for ore. No build
+# pads (intentionally undefended; lingering here is risky).
+# Smaller mu/radius than Planet means surface gravity is ~80% of Planet's --
+# easier to land soft, easier to accidentally bounce off too.
+PLANET3_NAME = "Frostbite"
+PLANET3_RADIUS = 80.0
+PLANET3_MU = 2_500_000.0
+PLANET3_COLOR = (200, 220, 240)
+PLANET3_RIM = (140, 170, 210)
+PLANET3_ORBIT_RADIUS = 3000.0
+PLANET3_INITIAL_PHASE = math.pi * 1.4
 
 # --- Moon (orbiting Planet) -------------------------------------------------
 # Hierarchical orbit: parented to Planet (which itself orbits the Sun).
@@ -501,10 +518,18 @@ def make_solar_system() -> list[Body]:
         parent=sun, orbit_radius=PLANET2_ORBIT_RADIUS,
         phase=PLANET2_INITIAL_PHASE, landable=True,
     )
+    frostbite = Body(
+        PLANET3_NAME, radius=PLANET3_RADIUS, mu=PLANET3_MU,
+        color=PLANET3_COLOR, rim=PLANET3_RIM,
+        parent=sun, orbit_radius=PLANET3_ORBIT_RADIUS,
+        phase=PLANET3_INITIAL_PHASE, landable=True,
+    )
     # Order matters for update_bodies(): a child body's update_at reads its
-    # parent's current pos/vel, so Sun -> Planet -> Moon -> Ember keeps the
-    # chain consistent within a single physics step.
-    return [sun, planet, moon, ember]
+    # parent's current pos/vel, so Sun -> Planet -> Moon -> Ember -> Frostbite
+    # keeps the chain consistent within a single physics step. (Moon comes
+    # before Ember/Frostbite because it parents to Planet; the rest parent
+    # to Sun and order-among-themselves doesn't matter.)
+    return [sun, planet, moon, ember, frostbite]
 
 
 def update_bodies(bodies: list[Body], t: float) -> None:
@@ -2109,9 +2134,20 @@ def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad]
     bodies = make_solar_system()
     sun = bodies[0]
     planet = bodies[1]
+    moon = bodies[2]
+    ember = bodies[3]
+    frostbite = bodies[4]
     update_bodies(bodies, 0.0)
-    deposits = generate_deposits(planet)
-    pads = generate_buildpads(planet)
+    # Ore distribution: 2 starter deposits on Planet, the bulk on Frostbite.
+    # The asymmetry forces a real expedition for sustained mining; Planet's
+    # 2 deposits are enough to bootstrap a turret or two locally.
+    deposits = (generate_deposits(planet, n=2)
+                + generate_deposits(frostbite, n=6))
+    # Pads: defensive infrastructure spread across the inner system.
+    # Frostbite is intentionally pad-less -- it's the destination, not a base.
+    pads = (generate_buildpads(planet)            # 5 -- main fortress
+            + generate_buildpads(ember, n=3)      # 3 -- forward base
+            + generate_buildpads(moon, n=2))      # 2 -- precision-landing
     return bodies, planet, sun, deposits, pads, [], [], []
 
 

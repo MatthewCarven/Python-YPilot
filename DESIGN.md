@@ -22,17 +22,18 @@ screen.
 
 ### Bodies
 
-A `Body` represents the Sun, the Planet, the Moon, or Ember. Bodies have
-mass (`mu` — gravitational parameter), an optional parent, an orbit
-radius, an initial phase angle, and a `landable` flag.
+A `Body` represents the Sun, the Planet, the Moon, Ember, or Frostbite.
+Bodies have mass (`mu` — gravitational parameter), an optional parent,
+an orbit radius, an initial phase angle, and a `landable` flag.
 
 The system is **hierarchical**:
 
 ```
 Sun
-└── Planet (orbit_radius=800, landable)
-│   └── Moon (orbit_radius=250 around Planet, landable)
-└── Ember  (orbit_radius=1800, landable)
+└── Planet     (orbit_radius=800,  landable)
+│   └── Moon   (orbit_radius=250 around Planet, landable)
+└── Ember      (orbit_radius=1800, landable)
+└── Frostbite  (orbit_radius=3000, landable)
 ```
 
 Each body has two methods:
@@ -45,8 +46,10 @@ Each body has two methods:
   predictor.
 
 `update_bodies(bodies, t)` walks the list in dependency order
-(`Sun → Planet → Moon → Ember`) so the chain stays consistent within a
-single physics step.
+(`Sun → Planet → Moon → Ember → Frostbite`) so the chain stays consistent
+within a single physics step. The two outer planets parent directly to
+the Sun; the Moon's Planet-parented entry sits before them in the list
+so it can read Planet's freshly-updated state.
 
 ### Why hierarchical orbits?
 
@@ -63,13 +66,27 @@ Two reasons:
    there's only ~39 px before Planet's gravity overpowers Moon's —
    so landings need real precision.
 
-### Why three landable bodies?
+### Why four landable bodies?
 
 With one planet, "navigate" means "fly forward". With two, you get a
-Hohmann transfer (Planet ↔ Ember, ~52 s burn). With three, the trajectory
-predictor's closest-approach marker has somewhere meaningful to point —
-near Planet it picks Moon, near Moon it picks Planet, near Ember it picks
-Planet. Always a useful "next destination".
+Hohmann transfer (Planet ↔ Ember, ~52 s burn). With four — Planet, Moon,
+Ember, and Frostbite — the trajectory predictor's closest-approach marker
+always has somewhere meaningful to point, and the *resource economy*
+gives each body a distinct role:
+
+- **Planet** — main fortress (5 build pads), starter ore (2 deposits).
+- **Moon** — moving point-defense platform (2 build pads orbiting Planet
+  at ~12 s period). No ore.
+- **Ember** — forward base (3 build pads), no ore. You haul ore here.
+- **Frostbite** — the ore world (6 deposits), no defenses. A
+  ~92 s Hohmann from Planet, ~146 s from Ember. The round trip is the
+  whole point: every defensive build commits the player to a real
+  expedition.
+
+The asymmetry is what makes the orbital mechanics matter beyond
+sightseeing. Mining and defending happen on different worlds; cargo
+trips have weight (even before any explicit cargo-capacity system —
+just by virtue of travel time and exposure to UFOs en route).
 
 The Moon **laps the player's default 370 px orbit** because shorter
 orbits are faster (`v = √(μ/r)`). Intercepts are real puzzles, not just
@@ -378,6 +395,9 @@ tweaked by feel:
 | `MOON_RADIUS` | 25 | Moon body radius |
 | `PLANET2_MU` (Ember) | 6 000 000 | Heavier than Planet |
 | `PLANET2_ORBIT_RADIUS` | 1800 | Hohmann transfer ~52 s |
+| `PLANET3_MU` (Frostbite) | 2 500 000 | Lighter than Planet (~80 % surface gravity) |
+| `PLANET3_ORBIT_RADIUS` | 3000 | Hohmann from Planet ~92 s; from Ember ~146 s |
+| `PLANET3_RADIUS` | 80 | Smaller than Planet — silhouette reads as "distant" |
 | `PREDICT_MAX_SECONDS` | 1000 | Predictor look-ahead ceiling (~16.7 min) |
 | `PREDICT_TARGET_STEPS` | 6400 | Predictor step-cap default (F5/F6 mutate at runtime) |
 | `PREDICT_TARGET_STEPS_MIN` | 100 | F5 floor — coarse but legal |

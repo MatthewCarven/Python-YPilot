@@ -5,11 +5,21 @@ Newtonian gravity, mine ore from surface deposits, construct auto-aim
 turrets at build pads, and defend against UFOs that drift in from
 off-screen.
 
-There's also a second planet — **Ember**, a rust-coloured wilderness
-world at orbit radius 1800 — for when home gets boring; a Hohmann
-transfer takes about 52 seconds. Planet has a small grey **Moon** in a
-hierarchical orbit (orbit radius 250, period ~12 s) — fast enough to
-lap you, small enough that landings need real precision.
+The system has four landable bodies, each playing a distinct role:
+
+- **Planet** at orbit 800 — the main base. Five build pads, two
+  starter ore deposits (enough to bootstrap a turret or two; you'll
+  need to leave for more).
+- **Moon** of Planet at orbit 250, period ~12 s — fast enough to lap
+  you, small enough that landings need real precision. Two build pads
+  ride the Moon, so any turret you mount here sweeps around Planet as
+  a moving anti-air platform.
+- **Ember** at orbit 1800 — rust-coloured forward base. Three build
+  pads, no ore. Hohmann transfer from Planet takes ~52 s.
+- **Frostbite** at orbit 3000 — pale, low-gravity ore world. Six
+  deposits and zero defensive infrastructure: it's a destination, not
+  a base. Hohmann from Planet ~92 s; from Ember ~146 s. The round
+  trip is the whole point of the resource economy.
 
 ## Run
 
@@ -28,8 +38,8 @@ desktop resolution.
 ## What's in the box
 
 - **Multi-body Newtonian gravity** — Sun, Planet, Moon (hierarchical,
-  parented to Planet), and Ember. Symplectic leapfrog integrator, so
-  closed orbits stay closed.
+  parented to Planet), Ember, and Frostbite. Symplectic leapfrog
+  integrator, so closed orbits stay closed.
 - **Trajectory predictor** with adaptive step, 5-second tick marks,
   periapsis/apoapsis dots with prograde-burn arrows, closest-approach
   marker, sphere-of-influence crossings, and a chaos-cone visualisation.
@@ -41,9 +51,12 @@ desktop resolution.
   the nearest landable body, with hover-hold and damp modifiers) and
   **J** for path-hold (tracks the most-recently-committed plan with a
   small corrective thrust).
-- **Mine, build, defend** — six ore deposits and five build pads on
-  Planet; spend ore at a build pad to construct a dumb turret that
-  leads enemies and fires every second.
+- **Mine, build, defend** — eight ore deposits split across Planet (2)
+  and Frostbite (6), and ten build pads spread across Planet (5),
+  Ember (3), and Moon (2). Spend ore at a build pad to construct a
+  dumb turret that leads enemies and fires every second. Mining and
+  defending happen on different worlds, so cross-system trips have
+  weight.
 - **Time-scale control** (F7/F8) from 1/16× to 16× without breaking
   predictor fidelity.
 - **Wall-clock-faithful video recording** (F9) — pipes raw frames to
