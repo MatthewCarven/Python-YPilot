@@ -47,6 +47,8 @@ Controls:
     0                  reset zoom to 1.0
     /                  shorter trajectory prediction window (down to 5s)
     *                  longer trajectory prediction window (up to 5min)
+    F1                 toggle HUD text overlay (world content stays visible)
+    F4                 minimise window (boss key)
     F5 / F6            halve / double the predictor's step budget; coarser
                        steps are cheaper but less faithful, finer steps cost
                        more per frame. Current value shown on HUD.
@@ -113,6 +115,10 @@ Controls:
 Run:
     pip install pygame-ce        # or: pip install pygame
     python ypilot.py
+
+    Also
+    winget install ffmpeg
+    if you want to record video
 """
 
 import datetime
@@ -2409,6 +2415,7 @@ def main() -> None:
     camera.zoom = 1.0
 
     fullscreen = False
+    hud_visible = True
     predict_seconds = PREDICT_SECONDS
     predict_target_steps = PREDICT_TARGET_STEPS
     time_scale = TIME_SCALE_DEFAULT
@@ -2697,6 +2704,10 @@ def main() -> None:
                     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
                     plan_burn_offset = 0.0
                     paused = False
+                elif event.key == pygame.K_F1:
+                    hud_visible = not hud_visible
+                elif event.key == pygame.K_F4:
+                    pygame.display.iconify()
                 elif event.key == pygame.K_F5:
                     predict_target_steps = max(
                         PREDICT_TARGET_STEPS_MIN, predict_target_steps // 2
@@ -3163,21 +3174,22 @@ def main() -> None:
         ship.draw(screen, camera)
 
         build_prompt = (candidate_pad is not None) and not build_held
-        draw_hud(screen, font, ship, bodies, sun, enemies, turrets,
-                 build_prompt, camera.zoom, predict_seconds,
-                 kills, enemies_enabled,
-                 paused=paused, plan_burn_duration=plan_burn_duration,
-                 plan_burn_dv=plan_burn_dv,
-                 predict_target_steps=predict_target_steps,
-                 live_peri_alt=live_peri_alt, live_apo_alt=live_apo_alt,
-                 plan_peri_alt=plan_peri_alt, plan_apo_alt=plan_apo_alt,
-                 ca_target_name=ca_target.name if ca_target is not None else None,
-                 live_ca_alt=live_ca_alt, plan_ca_alt=plan_ca_alt,
-                 chain_queue_size=len(maneuver_queue),
-                 chain_burn_count=chain_burn_count,
-                 pending_count=len(ship.pending_maneuvers),
-                 plan_burn_offset=plan_burn_offset,
-                 time_scale=time_scale)
+        if hud_visible:
+            draw_hud(screen, font, ship, bodies, sun, enemies, turrets,
+                     build_prompt, camera.zoom, predict_seconds,
+                     kills, enemies_enabled,
+                     paused=paused, plan_burn_duration=plan_burn_duration,
+                     plan_burn_dv=plan_burn_dv,
+                     predict_target_steps=predict_target_steps,
+                     live_peri_alt=live_peri_alt, live_apo_alt=live_apo_alt,
+                     plan_peri_alt=plan_peri_alt, plan_apo_alt=plan_apo_alt,
+                     ca_target_name=ca_target.name if ca_target is not None else None,
+                     live_ca_alt=live_ca_alt, plan_ca_alt=plan_ca_alt,
+                     chain_queue_size=len(maneuver_queue),
+                     chain_burn_count=chain_burn_count,
+                     pending_count=len(ship.pending_maneuvers),
+                     plan_burn_offset=plan_burn_offset,
+                     time_scale=time_scale)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)

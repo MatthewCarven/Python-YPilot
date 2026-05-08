@@ -236,6 +236,8 @@ want it.
 
 | Input | Effect |
 |---|---|
+| **F1** | Toggle HUD text overlay. World content (ship, trajectory, build menu, REC tally) stays visible — F1 only hides the text panels. |
+| **F4** | Minimise the window (boss key). The OS handles the un-minimise. |
 | **F10** | Toggle enemy spawns. Also clears any in scene. |
 | **F11** | Toggle fullscreen. |
 | **F12** | Save a screenshot (PNG) into `./captures/` (created if missing). |
@@ -248,8 +250,9 @@ want it.
 Mouse aim      A/D rotate          W/S thrust (Shift=5x, Ctrl=1%, Ctrl+Shift=0.1%)
 Q/E strafe     H brake-assist      J path-hold     B (hold) build
 +/- zoom       0 reset zoom        / shorter pred  * longer pred
-F5/F6 steps    F7/F8 time scale    F9 record       F10 enemies   F11 full
-F12 shot       R reset             Esc quit
+F1 HUD toggle  F4 minimise         F5/F6 steps     F7/F8 time scale
+F9 record      F10 enemies         F11 full        F12 shot
+R reset        Esc quit
 
 Plan mode (Space):
   Mouse aims burn  [ / ] duration   , / . fire-time
