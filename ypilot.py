@@ -333,20 +333,22 @@ SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 PLAN_BURN_DURATION_DEFAULT = 0.1
 PLAN_BURN_DURATION_MAX = 10.0
 PLAN_BURN_DURATION_MIN = -PLAN_BURN_DURATION_MAX  # symmetric: negative = retro
-PLAN_BURN_DURATION_STEP = 0.1               # plain [ / ]
-PLAN_BURN_DURATION_PRECISION_STEP = 0.01    # Ctrl + [ / ]
-PLAN_BURN_DURATION_FINE_STEP = 0.001        # Ctrl+Shift + [ / ]
-PLAN_BURN_DURATION_SUPERFINE_STEP = 0.0001  # Alt + [ / ]
+PLAN_BURN_DURATION_LEAP_STEP = 1.0           # Shift + [ / ]    (1-s leap)
+PLAN_BURN_DURATION_STEP = 0.1                # plain [ / ]
+PLAN_BURN_DURATION_PRECISION_STEP = 0.01     # Ctrl + [ / ]
+PLAN_BURN_DURATION_FINE_STEP = 0.001         # Ctrl+Shift + [ / ]
+PLAN_BURN_DURATION_SUPERFINE_STEP = 0.0001   # Alt + [ / ]
 # , / . (i.e. < / >) move the CURRENT preview burn's fire-time along the
 # trajectory. Same precision ladder as the duration ladder above. Floor is
 # the previous queued burn's offset so chain ordering stays monotonic;
 # ceiling is PREDICT_MAX_SECONDS. The offset is *user-controlled* once the
 # preview slot is active; auto-fill happens only when the slot resets (entry
 # to plan mode, after N, after Backspace).
-PLAN_BURN_OFFSET_STEP = 0.1               # plain , / .
-PLAN_BURN_OFFSET_PRECISION_STEP = 0.01    # Ctrl + , / .
-PLAN_BURN_OFFSET_FINE_STEP = 0.001        # Ctrl+Shift + , / .
-PLAN_BURN_OFFSET_SUPERFINE_STEP = 0.0001  # Alt + , / .
+PLAN_BURN_OFFSET_LEAP_STEP = 1.0           # Shift + , / .    (1-s leap)
+PLAN_BURN_OFFSET_STEP = 0.1                # plain , / .
+PLAN_BURN_OFFSET_PRECISION_STEP = 0.01     # Ctrl + , / .
+PLAN_BURN_OFFSET_FINE_STEP = 0.001         # Ctrl+Shift + , / .
+PLAN_BURN_OFFSET_SUPERFINE_STEP = 0.0001   # Alt + , / .
 PLAN_COLOR = (255, 170, 90)       # warm orange, distinct from PREDICT cyan
 # Same gradient treatment as the predicted line: orange near the ship,
 # fading to bright red at the horizon. Full brightness throughout so the
@@ -2499,10 +2501,13 @@ def main() -> None:
                         plan_burn_offset = popped_off
                 elif event.key in (pygame.K_LEFTBRACKET,
                                    pygame.K_RIGHTBRACKET) and paused:
-                    # Step ladder mirrors the thrust trim: plain = coarse,
+                    # Step ladder: Shift = leap (1.0 s), plain = coarse,
                     # Ctrl = precision, Ctrl+Shift = extra-fine, Alt =
-                    # super-fine. Lets you dial in a Hohmann burn to
-                    # tenths of a millisecond.
+                    # super-fine. Shift "boost" matches Shift+W thrust-
+                    # boost semantics: Shift makes the step bigger.
+                    # Ctrl-family makes it smaller. Lets you sweep across
+                    # a long predicted trajectory in seconds AND dial in
+                    # a Hohmann burn to tenths of a millisecond.
                     if event.mod & pygame.KMOD_ALT:
                         step = PLAN_BURN_DURATION_SUPERFINE_STEP
                     elif (event.mod & pygame.KMOD_CTRL
@@ -2510,6 +2515,8 @@ def main() -> None:
                         step = PLAN_BURN_DURATION_FINE_STEP
                     elif event.mod & pygame.KMOD_CTRL:
                         step = PLAN_BURN_DURATION_PRECISION_STEP
+                    elif event.mod & pygame.KMOD_SHIFT:
+                        step = PLAN_BURN_DURATION_LEAP_STEP
                     else:
                         step = PLAN_BURN_DURATION_STEP
                     if event.key == pygame.K_LEFTBRACKET:
@@ -2524,10 +2531,12 @@ def main() -> None:
                         )
                 elif event.key in (pygame.K_COMMA, pygame.K_PERIOD) and paused:
                     # , / .  (a.k.a. < / >) shift the current preview burn's
-                    # fire-time along the trajectory. Same precision ladder
-                    # as [ / ] -- plain / Ctrl / Ctrl+Shift / Alt = coarse
-                    # to super-fine. Floor: previous queued burn's offset
-                    # (chain stays monotonic). Ceiling: PREDICT_MAX_SECONDS.
+                    # fire-time along the trajectory. Same ladder as [ / ]:
+                    # Shift = leap (1.0 s) for sweeping across long
+                    # trajectories, plain / Ctrl / Ctrl+Shift / Alt for
+                    # coarse-to-super-fine homing in. Floor: previous
+                    # queued burn's offset (chain stays monotonic).
+                    # Ceiling: PREDICT_MAX_SECONDS.
                     if event.mod & pygame.KMOD_ALT:
                         step = PLAN_BURN_OFFSET_SUPERFINE_STEP
                     elif (event.mod & pygame.KMOD_CTRL
@@ -2535,6 +2544,8 @@ def main() -> None:
                         step = PLAN_BURN_OFFSET_FINE_STEP
                     elif event.mod & pygame.KMOD_CTRL:
                         step = PLAN_BURN_OFFSET_PRECISION_STEP
+                    elif event.mod & pygame.KMOD_SHIFT:
+                        step = PLAN_BURN_OFFSET_LEAP_STEP
                     else:
                         step = PLAN_BURN_OFFSET_STEP
                     floor = maneuver_queue[-1][2] if maneuver_queue else 0.0

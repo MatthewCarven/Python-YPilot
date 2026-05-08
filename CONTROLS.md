@@ -149,6 +149,7 @@ dropped — re-entering pause starts fresh.)
 
 | Combo | Step |
 |---|---|
+| **Shift + [ / ]** | 1.0 s (leap) |
 | **[ / ]** | 0.1 s (coarse) |
 | **Ctrl + [ / ]** | 0.01 s (precision) |
 | **Ctrl + Shift + [ / ]** | 0.001 s (extra-fine) |
@@ -167,6 +168,7 @@ without first expanding the predict window.
 
 | Combo | Step |
 |---|---|
+| **Shift + , / .** | 1.0 s (leap) |
 | **, / .** | 0.1 s |
 | **Ctrl + , / .** | 0.01 s |
 | **Ctrl + Shift + , / .** | 0.001 s |
@@ -234,5 +236,5 @@ F12 shot       R reset             Esc quit
 Plan mode (Space):
   Mouse aims burn  [ / ] duration   , / . fire-time
   N queue       Backspace pop       Enter commit chain   Space cancel
-  Modifiers: Ctrl=0.01, Ctrl+Shift=0.001, Alt=0.0001
+  Modifiers: Shift=1.0 leap, Ctrl=0.01, Ctrl+Shift=0.001, Alt=0.0001
 ```
