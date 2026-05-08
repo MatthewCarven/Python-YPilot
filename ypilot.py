@@ -577,12 +577,18 @@ def nearest_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
     if there isn't one in scene. The sun is not a viable landing target so
     it's filtered out.
 
-    NOTE: For "which body am I really orbiting", prefer `dominant_landable`
-    -- a Moon swinging past Planet can be geometrically nearer to a high-
-    orbit ship than Planet itself, yet Planet's gravity still dominates.
-    Geometric nearness is fine for "where will the ship spawn enemies"
-    or "what body is the trajectory's closest-approach marker pointing
-    at", but wrong for hover-hold target selection.
+    Used by:
+      - brake-assist target latching at engage time (sticky thereafter --
+        see `_brake_assist_accel`),
+      - HUD altitude / rel-speed anchor labelling,
+      - apsis-anchor selection,
+      - enemy spawn-target selection.
+
+    Geometric nearness is intuitive for the player but can lie about
+    "which body am I really orbiting" during a Moon flyby. The hover-
+    lurch that earlier motivated trying mu/r^2 dominance is now handled
+    by the sticky-on-engage latch in brake-assist, which keeps the
+    intuitive geometric pick AND eliminates the mid-hover switch.
     """
     best = None
     best_d2 = float("inf")
@@ -592,36 +598,6 @@ def nearest_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
         d2 = (b.pos - pos).length_squared()
         if d2 < best_d2:
             best_d2 = d2
-            best = b
-    return best
-
-
-def dominant_landable(pos: Vector2, bodies: list[Body]) -> Body | None:
-    """Landable body whose gravity dominates at `pos` (highest mu/r^2).
-
-    Use instead of `nearest_landable` when you want "which body am I really
-    orbiting" rather than "which body's center is geometrically closest".
-    A Moon swinging past Planet can be geometrically nearer to a high-
-    orbit ship than Planet itself, yet Planet's gravity still dominates --
-    so brake-assist matching the Moon's velocity in that moment would be
-    wrong. mu/r^2 picks the physically correct answer; the brake-assist
-    target only switches over when the ship is genuinely inside the
-    Moon's sphere of influence.
-
-    Mirrors the dominant-body concept used by `find_soi_crossings` for
-    SOI markers on the predicted trajectory, just filtered to landables.
-    """
-    best = None
-    best_g = 0.0
-    for b in bodies:
-        if not b.landable:
-            continue
-        d2 = (b.pos - pos).length_squared()
-        if d2 < 1e-3:
-            continue
-        g = b.mu / d2
-        if g > best_g:
-            best_g = g
             best = b
     return best
 
@@ -919,6 +895,7 @@ class Ship:
         self.retro_scale = RETRO_THRUST_SCALE
         self.brake_assist = False
         self.brake_assist_scale = 1.0
+        self.brake_assist_target: Body | None = None  # latched on engage
         self.hover_hold = False
         self.takeoff_lock_timer = 0.0
         self.fuel = MAX_FUEL
@@ -1328,13 +1305,26 @@ class Ship:
         (e.g. you've drifted into deep space far from the system).
         """
         if not self.brake_assist:
+            # Clear the latched target so the next engage picks fresh.
+            self.brake_assist_target = None
             return Vector2(0.0, 0.0)
 
-        # Use mu/r^2 dominance, not geometric nearness: a Moon swinging
-        # past Planet can be geometrically closer to a high-orbit ship
-        # than Planet itself but is NOT the body the ship is orbiting.
-        # See dominant_landable for the full reasoning.
-        target = dominant_landable(pos, bodies)
+        # Sticky-on-engage targeting: lock onto the geometrically nearest
+        # landable at the moment brake-assist first runs after toggle, and
+        # hold that body until brake-assist toggles off. Solves two
+        # problems with one mechanism:
+        #   (1) Moon swooping past a high Planet orbit no longer lurches
+        #       hover -- the target was latched on Planet at engage and
+        #       doesn't switch mid-flight regardless of who's geometrically
+        #       closest now.
+        #   (2) Moon landings work as before -- fly close to the Moon,
+        #       press H, target latches on Moon, brake-assist matches its
+        #       126 px/s tangential velocity from a comfortable distance.
+        # To retarget, toggle H off and on -- explicit pilot intent rather
+        # than a silent autopilot guess.
+        if self.brake_assist_target is None:
+            self.brake_assist_target = nearest_landable(pos, bodies)
+        target = self.brake_assist_target
         if target is not None:
             rel_vel = vel - target.vel
             if self.hover_hold:
