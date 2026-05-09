@@ -109,7 +109,13 @@ Controls:
     F11                toggle fullscreen
     F12                save screenshot (PNG) into ./captures/ (created
                        if missing)
-    R                  reset world
+    R                  reset world (default solar system)
+    Shift + R          reset to a freshly-rolled random universe
+                       (1-6 planets, optional moons, e <= 0.3). Seed
+                       printed on HUD so memorable rolls can be recalled.
+    Ctrl+Shift + R     prompt for a specific random-universe seed
+                       (digits, Enter to commit, Esc to cancel). Lets you
+                       re-summon a seed shared by a friend / written down.
     Esc                quit
 
 Run:
@@ -122,6 +128,7 @@ Run:
 """
 
 import datetime
+import json
 import math
 import os
 import queue
@@ -468,19 +475,51 @@ class Camera:
 # Body (sun, planet, ...)
 # ============================================================================
 
+def solve_kepler(M: float, e: float, tol: float = 1e-9,
+                 max_iter: int = 5) -> float:
+    """Solve M = E - e*sin(E) for E (eccentric anomaly), Newton-Raphson.
+
+    For e <= 0.3 the initial guess E = M + e*sin(M) converges in 3-4
+    iterations -- the 5-iter cap is defensive headroom. Wraps M into
+    [0, 2pi) first to keep the solve well-behaved at large t.
+    """
+    M = M % (2.0 * math.pi)
+    E = M + e * math.sin(M)
+    for _ in range(max_iter):
+        delta = (E - e * math.sin(E) - M) / (1.0 - e * math.cos(E))
+        E -= delta
+        if abs(delta) < tol:
+            break
+    return E
+
+
 class Body:
     def __init__(self, name: str, radius: float, mu: float,
                  color, rim, parent=None, orbit_radius: float = 0.0,
-                 phase: float = 0.0, landable: bool = True):
+                 phase: float = 0.0, landable: bool = True,
+                 eccentricity: float = 0.0,
+                 arg_periapsis: float = 0.0):
         self.name = name
         self.radius = radius
         self.mu = mu
         self.color = color
         self.rim = rim
         self.parent = parent
-        self.orbit_radius = orbit_radius
-        self.phase = phase
+        self.orbit_radius = orbit_radius  # semi-major axis a (== r when e=0)
+        self.phase = phase                # mean anomaly at t=0
         self.landable = landable
+        # Eccentricity 0 = circular (existing behaviour, bit-identical fast
+        # path). >0 means an elliptical orbit with periapsis at angle
+        # arg_periapsis around the parent. Capped to e <= 0.3 by the random
+        # universe generator; default-universe bodies all use e=0.
+        self.eccentricity = eccentricity
+        self.arg_periapsis = arg_periapsis
+        # Cached so the per-frame ellipse path doesn't recompute these.
+        # cos/sin of arg_periapsis are pure rotation; sqrt(1-e^2) shows up
+        # in both position and velocity formulas.
+        self._cos_w = math.cos(arg_periapsis)
+        self._sin_w = math.sin(arg_periapsis)
+        self._sqrt_one_minus_e2 = math.sqrt(max(0.0, 1.0 - eccentricity ** 2))
         if parent is None or orbit_radius <= 0.0:
             self.omega = 0.0
         else:
@@ -493,20 +532,65 @@ class Body:
         if self.parent is None:
             self.pos = Vector2(0.0, 0.0)
             self.vel = Vector2(0.0, 0.0)
-        else:
+            return
+        if self.eccentricity == 0.0:
+            # Circular fast path -- bit-identical to pre-ellipse code so
+            # path-hold's predictor<->live agreement doesn't drift on the
+            # default universe.
             angle = self.phase + self.omega * t
             radial = Vector2(math.cos(angle), math.sin(angle))
             tangent = Vector2(-radial.y, radial.x)
             self.pos = self.parent.pos + radial * self.orbit_radius
             self.vel = self.parent.vel + tangent * (self.omega * self.orbit_radius)
+            return
+        # Elliptical: solve Kepler for eccentric anomaly E, then position
+        # in the periapsis-aligned focus-origin frame; rotate into world.
+        M = self.phase + self.omega * t
+        E = solve_kepler(M, self.eccentricity)
+        a = self.orbit_radius
+        e = self.eccentricity
+        cos_E = math.cos(E)
+        sin_E = math.sin(E)
+        x_orb = a * (cos_E - e)
+        y_orb = a * self._sqrt_one_minus_e2 * sin_E
+        # Velocity via dE/dt = n / (1 - e*cos(E)), n = mean motion = omega.
+        denom = 1.0 - e * cos_E
+        dEdt = self.omega / denom
+        vx_orb = -a * sin_E * dEdt
+        vy_orb = a * self._sqrt_one_minus_e2 * cos_E * dEdt
+        # Rotate by arg_periapsis into parent-relative world frame.
+        cw, sw = self._cos_w, self._sin_w
+        self.pos = self.parent.pos + Vector2(
+            x_orb * cw - y_orb * sw,
+            x_orb * sw + y_orb * cw,
+        )
+        self.vel = self.parent.vel + Vector2(
+            vx_orb * cw - vy_orb * sw,
+            vx_orb * sw + vy_orb * cw,
+        )
 
     def position_at(self, t: float) -> Vector2:
         if self.parent is None:
             return Vector2(0.0, 0.0)
-        angle = self.phase + self.omega * t
+        if self.eccentricity == 0.0:
+            # Circular fast path -- must stay bit-identical to update_at's
+            # circular branch and to pre-ellipse code; the predictor reads
+            # this and path-hold tracks it, so drift here breaks autopilot.
+            angle = self.phase + self.omega * t
+            return self.parent.position_at(t) + Vector2(
+                math.cos(angle), math.sin(angle)
+            ) * self.orbit_radius
+        M = self.phase + self.omega * t
+        E = solve_kepler(M, self.eccentricity)
+        a = self.orbit_radius
+        e = self.eccentricity
+        x_orb = a * (math.cos(E) - e)
+        y_orb = a * self._sqrt_one_minus_e2 * math.sin(E)
+        cw, sw = self._cos_w, self._sin_w
         return self.parent.position_at(t) + Vector2(
-            math.cos(angle), math.sin(angle)
-        ) * self.orbit_radius
+            x_orb * cw - y_orb * sw,
+            x_orb * sw + y_orb * cw,
+        )
 
 
 def make_solar_system() -> list[Body]:
@@ -545,6 +629,161 @@ def make_solar_system() -> list[Body]:
     # before Ember/Frostbite because it parents to Planet; the rest parent
     # to Sun and order-among-themselves doesn't matter.)
     return [sun, planet, moon, ember, frostbite]
+
+
+# Random-universe constants. Tweak by feel between sessions; documented
+# trade-offs in the plan file. MAX_E caps eccentricity globally so no orbit
+# is so dramatic it eats half the screen at apoapsis. SHELL_BUFFER is the
+# minimum gap between adjacent shells' periapsis/apoapsis -- ~ planet
+# diameter. SPACING_RATIO_MIN must be >= 1 + 2*MAX_E + buffer/a or shell
+# packing fails; 1.7 has comfortable headroom for MAX_E=0.3.
+RANDOM_PLANETS_MIN = 1
+RANDOM_PLANETS_MAX = 6
+RANDOM_MOONS_PER_PLANET_MAX = 2
+RANDOM_MOONS_TOTAL_MAX = 4
+RANDOM_FIRST_AXIS_MIN = 600.0
+RANDOM_FIRST_AXIS_MAX = 1200.0
+RANDOM_SPACING_RATIO_MIN = 1.7
+RANDOM_SPACING_RATIO_MAX = 2.4
+RANDOM_MAX_E = 0.3
+RANDOM_SHELL_BUFFER = 100.0
+RANDOM_PLANET_RADIUS_MIN = 40.0
+RANDOM_PLANET_RADIUS_MAX = 130.0
+RANDOM_PLANET_MU_MIN = 1.0e6
+RANDOM_PLANET_MU_MAX = 8.0e6
+RANDOM_MOON_RADIUS_MIN = 15.0
+RANDOM_MOON_RADIUS_MAX = 35.0
+RANDOM_MOON_MU_FRAC_MIN = 0.02
+RANDOM_MOON_MU_FRAC_MAX = 0.08
+RANDOM_MOON_ZONE_FRAC = 0.4   # apoapsis must clear 0.4 * SOI ~= Hill/2.5
+RANDOM_MOON_SPACING_MIN = 1.5
+RANDOM_MOON_SPACING_MAX = 2.0
+# Color palette indexed by orbit position (closer-in -> hotter palette).
+# Each entry is (body_color, rim_color).
+RANDOM_PALETTE = [
+    ((220, 90, 60),  (160, 50, 30)),    # hot red
+    ((220, 140, 60), (160, 90, 30)),    # ember orange
+    ((200, 180, 80), (140, 120, 40)),   # gold
+    ((90, 160, 220), (40, 90, 150)),    # blue (default-Planet-ish)
+    ((100, 200, 180), (50, 140, 120)),  # cyan-green
+    ((200, 220, 240), (140, 170, 210)), # icy white-blue
+]
+
+
+def make_random_solar_system(seed: int) -> list[Body]:
+    """Generate a randomised Sun + planets (+moons) system from a 32-bit seed.
+
+    Returns bodies in update_bodies-safe order: sun first, then heliocentric
+    planets in increasing semi-major axis, then any moons (each after its
+    parent planet). Names are P1..P6 / P{i}M{j} so save-file `body_ref`
+    lookups are stable per seed.
+
+    Shell-packing guarantees no orbit-crossings: geometric a-spacing keeps
+    raw shells separated by a comfortable factor; a two-pass eccentricity
+    roll then samples e_k <= min(MAX_E, gap/a) so periapsis/apoapsis can't
+    overlap a neighbour. Pass 1 uses provisional e_next=0; pass 2 refines.
+    """
+    rng = random.Random(seed)
+    sun = Body(
+        "Sun", radius=SUN_RADIUS, mu=SUN_MU,
+        color=SUN_COLOR, rim=SUN_RIM, landable=False,
+    )
+    bodies: list[Body] = [sun]
+
+    n_planets = rng.randint(RANDOM_PLANETS_MIN, RANDOM_PLANETS_MAX)
+    semi_major: list[float] = []
+    a = rng.uniform(RANDOM_FIRST_AXIS_MIN, RANDOM_FIRST_AXIS_MAX)
+    for _ in range(n_planets):
+        semi_major.append(a)
+        a *= rng.uniform(RANDOM_SPACING_RATIO_MIN, RANDOM_SPACING_RATIO_MAX)
+
+    eccentricities = [0.0] * n_planets
+    arg_periapses = [
+        rng.uniform(0.0, 2.0 * math.pi) for _ in range(n_planets)
+    ]
+
+    def e_max_for(idx: int) -> float:
+        a_k = semi_major[idx]
+        if idx + 1 < n_planets:
+            next_peri = semi_major[idx + 1] * (1.0 - eccentricities[idx + 1])
+            outer = (next_peri - RANDOM_SHELL_BUFFER - a_k) / a_k
+        else:
+            outer = RANDOM_MAX_E
+        if idx > 0:
+            prev_apo = semi_major[idx - 1] * (1.0 + eccentricities[idx - 1])
+            inner = (a_k - prev_apo - RANDOM_SHELL_BUFFER) / a_k
+        else:
+            # Innermost shell: must clear the sun by buffer.
+            inner = (a_k - SUN_RADIUS - RANDOM_SHELL_BUFFER) / a_k
+        return max(0.0, min(RANDOM_MAX_E, outer, inner))
+
+    # Two passes: first with provisional e_next=0, second refines knowing
+    # the actual neighbours. For e <= 0.3 the geometric spacing makes this
+    # converge after one pass; the second is belt-and-braces.
+    for _ in range(2):
+        for i in range(n_planets):
+            eccentricities[i] = rng.uniform(0.0, e_max_for(i))
+
+    planets: list[Body] = []
+    for i in range(n_planets):
+        col, rim = RANDOM_PALETTE[min(i, len(RANDOM_PALETTE) - 1)]
+        planet = Body(
+            f"P{i + 1}",
+            radius=rng.uniform(RANDOM_PLANET_RADIUS_MIN,
+                               RANDOM_PLANET_RADIUS_MAX),
+            mu=rng.uniform(RANDOM_PLANET_MU_MIN, RANDOM_PLANET_MU_MAX),
+            color=col, rim=rim,
+            parent=sun, orbit_radius=semi_major[i],
+            phase=rng.uniform(0.0, 2.0 * math.pi),
+            landable=True,
+            eccentricity=eccentricities[i],
+            arg_periapsis=arg_periapses[i],
+        )
+        planets.append(planet)
+        bodies.append(planet)
+
+    # Moons: rolled per-planet, total capped so predictor cost stays
+    # bounded (each body adds Kepler-solve work to every predictor step).
+    moon_count = 0
+    for i, planet in enumerate(planets):
+        if moon_count >= RANDOM_MOONS_TOTAL_MAX:
+            break
+        n_moons = rng.randint(0, RANDOM_MOONS_PER_PLANET_MAX)
+        n_moons = min(n_moons, RANDOM_MOONS_TOTAL_MAX - moon_count)
+        if n_moons == 0:
+            continue
+        # Stable moon zone: a * (m_p/m_sun)^(2/5) is SOI; using mu as the
+        # mass proxy. Hill/2.5 ~= 0.4 * SOI keeps moons from being yanked
+        # off by the sun at periapsis of an elliptical planet orbit.
+        soi = semi_major[i] * (planet.mu / sun.mu) ** (2.0 / 5.0)
+        zone_max = RANDOM_MOON_ZONE_FRAC * soi
+        moon_a = max(planet.radius * 2.5, planet.radius + 60.0)
+        for j in range(n_moons):
+            moon_a *= rng.uniform(RANDOM_MOON_SPACING_MIN,
+                                  RANDOM_MOON_SPACING_MAX)
+            if moon_a * (1.0 + RANDOM_MAX_E) >= zone_max:
+                break  # ran out of stable space
+            e_max_moon = max(0.0, min(RANDOM_MAX_E,
+                                      (zone_max - moon_a) / moon_a))
+            moon = Body(
+                f"P{i + 1}M{j + 1}",
+                radius=rng.uniform(RANDOM_MOON_RADIUS_MIN,
+                                   RANDOM_MOON_RADIUS_MAX),
+                mu=planet.mu * rng.uniform(RANDOM_MOON_MU_FRAC_MIN,
+                                           RANDOM_MOON_MU_FRAC_MAX),
+                color=(180, 175, 170), rim=(120, 115, 110),
+                parent=planet, orbit_radius=moon_a,
+                phase=rng.uniform(0.0, 2.0 * math.pi),
+                landable=True,
+                eccentricity=rng.uniform(0.0, e_max_moon),
+                arg_periapsis=rng.uniform(0.0, 2.0 * math.pi),
+            )
+            bodies.append(moon)
+            moon_count += 1
+            if moon_count >= RANDOM_MOONS_TOTAL_MAX:
+                break
+
+    return bodies
 
 
 def update_bodies(bodies: list[Body], t: float) -> None:
@@ -1999,7 +2238,8 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              chain_burn_count: int = 1,
              pending_count: int = 0,
              plan_burn_offset: float = 0.0,
-             time_scale: float = 1.0) -> None:
+             time_scale: float = 1.0,
+             universe_spec: dict | None = None) -> None:
     if ship.alive:
         # Anchor altitude / rel-speed / v_circ to whichever landable body is
         # currently closest. As the player approaches Ember, the HUD silently
@@ -2040,7 +2280,11 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             f"Kills:       {kills}",
             f"Zoom:        x{zoom:.2f}    Predict: {predict_seconds:.0f}s "
             f"({predict_target_steps} steps)"
-            + (f"    Time: x{time_scale:g}" if time_scale != 1.0 else ""),
+            + (f"    Time: x{time_scale:g}" if time_scale != 1.0 else "")
+            + (f"    Seed: {universe_spec['seed']}"
+               if universe_spec is not None
+               and universe_spec.get("type") == "random"
+               else ""),
             f"Peri / Apo:  {_fmt_apsis(live_peri_alt)} / {_fmt_apsis(live_apo_alt)}"
             f"    (vs {body_label})",
         ]
@@ -2194,6 +2438,64 @@ def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad]
             + generate_buildpads(ember, n=3)      # 3 -- forward base
             + generate_buildpads(moon, n=2))      # 2 -- precision-landing
     return bodies, planet, sun, deposits, pads, [], [], []
+
+
+def build_world_for(spec: dict) -> tuple[
+        list[Body], Body, Body, list[Deposit], list[BuildPad],
+        list[Turret], list[Bullet], list[Enemy]]:
+    """Universe-spec-aware world builder. Returns the same 8-tuple as
+    build_world(), with `starter` (innermost landable) in the Body slot
+    where build_world used to return literally `planet`.
+
+    spec shapes:
+        {"type": "default"}                  -> hand-tuned solar system
+        {"type": "random", "seed": int}      -> randomised system
+
+    Allocation policy preserves the gameplay arc regardless of body
+    count: starter (innermost landable) gets the bootstrap deposits +
+    the bulk of pads; destination (outermost landable) gets the bulk of
+    deposits and zero pads (forces an expedition); middle bodies get a
+    handful of pads each; moons get a couple of pads.
+    """
+    if spec.get("type") == "random":
+        bodies = make_random_solar_system(int(spec["seed"]))
+    else:
+        bodies = make_solar_system()
+    sun = bodies[0]
+    update_bodies(bodies, 0.0)
+
+    landable_planets = [b for b in bodies
+                        if b.landable and b.parent is sun]
+    landable_planets.sort(key=lambda b: b.orbit_radius)
+    landable_moons = [b for b in bodies
+                      if b.landable and b.parent is not None
+                      and b.parent is not sun]
+
+    if not landable_planets:
+        # Defensive: no planets at all should be impossible (min count >=1
+        # for both default and random). Fall back rather than crash.
+        return build_world_for({"type": "default"})
+
+    starter = landable_planets[0]
+    destination = landable_planets[-1]
+    middle = landable_planets[1:-1] if len(landable_planets) > 1 else []
+
+    if starter is destination:
+        # Single-planet system -- collapse the starter/destination split
+        # by giving the lone planet the destination's deposit quota
+        # (more interesting to mine) but starter's pad quota.
+        deposits = generate_deposits(starter, n=6)
+        pads = generate_buildpads(starter, n=5)
+    else:
+        deposits = (generate_deposits(starter, n=2)
+                    + generate_deposits(destination, n=6))
+        pads = generate_buildpads(starter, n=5)
+        for b in middle:
+            pads.extend(generate_buildpads(b, n=3))
+    for b in landable_moons:
+        pads.extend(generate_buildpads(b, n=2))
+
+    return bodies, starter, sun, deposits, pads, [], [], []
 
 
 # ============================================================================
@@ -2387,6 +2689,375 @@ class Recorder:
 # Main loop
 # ============================================================================
 
+# ============================================================================
+# Save / load (F2 quickload, F3 quicksave)
+# ============================================================================
+#
+# Bodies are deterministic from sim_time, so we don't serialise their state --
+# restoring sim_time + calling update_bodies() puts them exactly where they
+# were. Cross-references go by stable handles: Bodies by name, Deposits by
+# list index. Pad <-> Turret link is restored via pad_idx stored on each
+# saved turret. Schema is versioned; loader fills missing fields with sane
+# defaults and reports a HUD warning when the version doesn't match, so a
+# code change that grows the schema doesn't strand existing saves.
+
+SAVE_VERSION = 2
+SAVES_DIR = "saves"
+QUICKSAVE_NAME = "quicksave"
+HUD_MESSAGE_DURATION = 2.5
+
+
+def _v2list(v: Vector2) -> list:
+    return [v.x, v.y]
+
+
+def _list2v(data) -> Vector2:
+    return Vector2(data[0], data[1])
+
+
+def _ship_to_dict(ship: "Ship", deposits: list[Deposit]) -> dict:
+    body_ref = lambda b: b.name if b is not None else None
+    if ship.mining_target in deposits:
+        mt_idx = deposits.index(ship.mining_target)
+    else:
+        mt_idx = None
+    return {
+        "pos": _v2list(ship.pos),
+        "vel": _v2list(ship.vel),
+        "angle": ship.angle,
+        "fuel": ship.fuel,
+        "ore": ship.ore,
+        "alive": ship.alive,
+        "landed": ship.landed,
+        "landed_body": body_ref(ship.landed_body),
+        "landed_radial": ship.landed_radial,
+        "mining_target_idx": mt_idx,
+        "takeoff_lock_timer": ship.takeoff_lock_timer,
+        "thrust_scale": ship.thrust_scale,
+        "retro_scale": ship.retro_scale,
+        "brake_assist": ship.brake_assist,
+        "brake_assist_scale": ship.brake_assist_scale,
+        "brake_assist_target": body_ref(ship.brake_assist_target),
+        "hover_hold": ship.hover_hold,
+        "path_hold": ship.path_hold,
+        "path_hold_error": ship.path_hold_error,
+        "planned_trajectory": [
+            [t, _v2list(p), _v2list(v)]
+            for (t, p, v) in ship.planned_trajectory
+        ],
+        "pending_maneuvers": [
+            [t, _v2list(d), dur]
+            for (t, d, dur) in ship.pending_maneuvers
+        ],
+    }
+
+
+def _ship_apply_dict(ship: "Ship", data: dict,
+                     body_by_name: dict, deposits: list[Deposit],
+                     warnings: list[str] | None = None) -> None:
+    ship.pos = _list2v(data["pos"])
+    ship.vel = _list2v(data["vel"])
+    ship.angle = float(data.get("angle", 0.0))
+    ship.fuel = float(data.get("fuel", MAX_FUEL))
+    ship.ore = float(data.get("ore", 0.0))
+    ship.alive = bool(data.get("alive", True))
+    landed_name = data.get("landed_body")
+    landed_body = body_by_name.get(landed_name)
+    if landed_name is not None and landed_body is None:
+        # Universe-mismatch case: saved ship was landed on a body that
+        # doesn't exist in the rebuilt world (corrupted save / schema
+        # drift). Drop landed state so the ship just falls under gravity
+        # rather than holding a dangling None reference. Two-phase F2
+        # should make this unreachable in normal operation -- if it
+        # fires, the user should know.
+        if warnings is not None:
+            warnings.append(f"saved landed body '{landed_name}' missing")
+        ship.landed = False
+        ship.landed_body = None
+    else:
+        ship.landed = bool(data.get("landed", False))
+        ship.landed_body = landed_body
+    ship.landed_radial = float(data.get("landed_radial", 0.0))
+    mt_idx = data.get("mining_target_idx")
+    if mt_idx is not None and 0 <= mt_idx < len(deposits):
+        ship.mining_target = deposits[mt_idx]
+    else:
+        ship.mining_target = None
+    ship.takeoff_lock_timer = float(data.get("takeoff_lock_timer", 0.0))
+    ship.thrust_scale = float(data.get("thrust_scale", 1.0))
+    ship.retro_scale = float(data.get("retro_scale", RETRO_THRUST_SCALE))
+    ship.brake_assist = bool(data.get("brake_assist", False))
+    ship.brake_assist_scale = float(data.get("brake_assist_scale", 1.0))
+    ship.brake_assist_target = body_by_name.get(
+        data.get("brake_assist_target")
+    )
+    ship.hover_hold = bool(data.get("hover_hold", False))
+    ship.path_hold = bool(data.get("path_hold", False))
+    ship.path_hold_error = float(data.get("path_hold_error", 0.0))
+    ship.planned_trajectory = [
+        (float(t), _list2v(p), _list2v(v))
+        for (t, p, v) in data.get("planned_trajectory", [])
+    ]
+    ship._path_hold_hint = 0
+    ship.pending_maneuvers = [
+        (float(t), _list2v(d), float(dur))
+        for (t, d, dur) in data.get("pending_maneuvers", [])
+    ]
+    # Transient input flags reset; the next frame's key state repopulates them.
+    ship.thrusting = False
+    ship.retro_thrusting = False
+    ship.strafing_left = False
+    ship.strafing_right = False
+    ship._sim_time = 0.0
+    ship._path_hold_cached_accel = Vector2(0.0, 0.0)
+
+
+def save_session(path: str, universe_spec: dict, sim_time: float,
+                 ship: "Ship", camera: Camera,
+                 deposits: list[Deposit], pads: list[BuildPad],
+                 turrets: list[Turret], enemies: list[Enemy],
+                 kills: int, enemies_enabled: bool,
+                 enemy_spawn_timer: float, paused: bool,
+                 plan_burn_duration: float, plan_burn_offset: float,
+                 maneuver_queue: list,
+                 predict_seconds: float, predict_target_steps: int,
+                 time_scale: float, hud_visible: bool) -> None:
+    pad_idx_for_turret: dict[int, int] = {}
+    for i, p in enumerate(pads):
+        if p.turret is not None:
+            pad_idx_for_turret[id(p.turret)] = i
+
+    data = {
+        "version": SAVE_VERSION,
+        # Round-trips R / Shift+R choice so a quickload of a random
+        # universe re-seeds the same generator and gets bit-identical
+        # bodies before _ship_apply_dict re-attaches to them by name.
+        "universe": dict(universe_spec),
+        "sim_time": sim_time,
+        "ship": _ship_to_dict(ship, deposits),
+        "camera": {"pos": _v2list(camera.pos), "zoom": camera.zoom},
+        "deposits": [{"quantity": d.quantity} for d in deposits],
+        "turrets": [
+            {
+                "pad_idx": pad_idx_for_turret.get(id(t)),
+                "body": t.body.name,
+                "mount_angle": t.mount_angle,
+                "angle": t.angle,
+                "fire_cooldown": t.fire_cooldown,
+                "alive": t.alive,
+            }
+            for t in turrets
+        ],
+        "enemies": [
+            {
+                "pos": _v2list(e.pos),
+                "vel": _v2list(e.vel),
+                "hp": e.hp,
+                "alive": e.alive,
+                "course_correct_timer": e.course_correct_timer,
+            }
+            for e in enemies
+        ],
+        "stats": {
+            "kills": kills,
+            "enemies_enabled": enemies_enabled,
+            "enemy_spawn_timer": enemy_spawn_timer,
+        },
+        "plan_mode": {
+            "paused": paused,
+            "burn_duration": plan_burn_duration,
+            "burn_offset": plan_burn_offset,
+            "queue": [list(entry) for entry in maneuver_queue],
+        },
+        "view": {
+            "predict_seconds": predict_seconds,
+            "predict_target_steps": predict_target_steps,
+            "time_scale": time_scale,
+            "hud_visible": hud_visible,
+        },
+    }
+
+    save_dir = os.path.dirname(path)
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+
+    # Atomic-ish write: rotate previous to .bak, write to .tmp, rename onto
+    # path. A crash mid-save thus can't corrupt the active slot -- the worst
+    # case is a stray .tmp left behind.
+    bak = path + ".bak"
+    if os.path.exists(path):
+        try:
+            os.replace(path, bak)
+        except OSError:
+            pass
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
+def load_session_file(path: str) -> dict | None:
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as ex:
+        print(f"[load] failed to read {path}: {ex}")
+        return None
+
+
+def apply_session(data: dict, ship: "Ship", camera: Camera,
+                  bodies: list[Body], deposits: list[Deposit],
+                  pads: list[BuildPad], turrets: list[Turret],
+                  enemies: list[Enemy], bullets: list[Bullet],
+                  maneuver_queue: list) -> dict:
+    """Apply a save dict to live mutable state in-place. Returns scalar
+    fields the caller has to rebind in main()'s frame (sim_time, paused,
+    kills, ...) plus a `partial` flag that's True when the saved version
+    didn't match SAVE_VERSION (driven by the 'best-effort + warning'
+    contract: missing fields fall back to defaults, the caller surfaces
+    a HUD warning).
+    """
+    body_by_name = {b.name: b for b in bodies}
+    saved_version = data.get("version", 0)
+    partial = saved_version != SAVE_VERSION
+    warnings: list[str] = []
+
+    sim_time = float(data.get("sim_time", 0.0))
+    update_bodies(bodies, sim_time)
+
+    _ship_apply_dict(ship, data["ship"], body_by_name, deposits, warnings)
+
+    cam = data.get("camera", {})
+    if "pos" in cam:
+        camera.pos = _list2v(cam["pos"])
+    if "zoom" in cam:
+        camera.zoom = float(cam["zoom"])
+
+    saved_deps = data.get("deposits", [])
+    for i, d in enumerate(deposits):
+        if i < len(saved_deps):
+            d.quantity = float(saved_deps[i].get("quantity", d.max_quantity))
+
+    for p in pads:
+        p.turret = None
+
+    turrets.clear()
+    for tdata in data.get("turrets", []):
+        body = body_by_name.get(tdata.get("body"))
+        if body is None:
+            continue
+        t = Turret(body, float(tdata.get("mount_angle", 0.0)))
+        t.angle = float(tdata.get("angle", t.mount_angle))
+        t.fire_cooldown = float(tdata.get("fire_cooldown", 0.0))
+        t.alive = bool(tdata.get("alive", True))
+        turrets.append(t)
+        pad_idx = tdata.get("pad_idx")
+        if pad_idx is not None and 0 <= pad_idx < len(pads):
+            pads[pad_idx].turret = t
+
+    enemies.clear()
+    for edata in data.get("enemies", []):
+        e = Enemy(_list2v(edata["pos"]), _list2v(edata["vel"]))
+        e.hp = float(edata.get("hp", ENEMY_HP))
+        e.alive = bool(edata.get("alive", True))
+        e.course_correct_timer = float(
+            edata.get("course_correct_timer", 0.0)
+        )
+        enemies.append(e)
+
+    # In-flight bullets are cosmetic + fire-and-forget; drop on load.
+    bullets.clear()
+
+    plan = data.get("plan_mode", {})
+    paused = bool(plan.get("paused", False))
+    plan_burn_duration = float(
+        plan.get("burn_duration", PLAN_BURN_DURATION_DEFAULT)
+    )
+    plan_burn_offset = float(plan.get("burn_offset", 0.0))
+    maneuver_queue.clear()
+    for entry in plan.get("queue", []):
+        if len(entry) >= 3:
+            maneuver_queue.append(
+                (float(entry[0]), float(entry[1]), float(entry[2]))
+            )
+
+    stats = data.get("stats", {})
+    kills = int(stats.get("kills", 0))
+    enemies_enabled = bool(stats.get("enemies_enabled", True))
+    enemy_spawn_timer = float(
+        stats.get("enemy_spawn_timer", ENEMY_SPAWN_INTERVAL * 0.5)
+    )
+
+    view = data.get("view", {})
+    predict_seconds = float(view.get("predict_seconds", PREDICT_SECONDS))
+    predict_target_steps = int(
+        view.get("predict_target_steps", PREDICT_TARGET_STEPS)
+    )
+    time_scale = float(view.get("time_scale", TIME_SCALE_DEFAULT))
+    hud_visible = bool(view.get("hud_visible", True))
+
+    return {
+        "sim_time": sim_time,
+        "paused": paused,
+        "plan_burn_duration": plan_burn_duration,
+        "plan_burn_offset": plan_burn_offset,
+        "kills": kills,
+        "enemies_enabled": enemies_enabled,
+        "enemy_spawn_timer": enemy_spawn_timer,
+        "predict_seconds": predict_seconds,
+        "predict_target_steps": predict_target_steps,
+        "time_scale": time_scale,
+        "hud_visible": hud_visible,
+        "partial": partial,
+        "saved_version": saved_version,
+        "warnings": warnings,
+    }
+
+
+def draw_seed_prompt(surf: pygame.Surface, font: pygame.font.Font,
+                     buffer: str) -> None:
+    """Modal text-entry overlay for Ctrl+Shift+R custom-seed loading.
+
+    Sim is frozen while this is on-screen (see seed_prompt_active guard
+    in the main loop). Trailing underscore is a visible caret so the
+    cursor is obvious while the field is empty.
+    """
+    label = "Enter seed (digits, Enter to commit, Esc to cancel)"
+    body_text = (buffer if buffer else "") + "_"
+    label_surf = font.render(label, True, (220, 220, 220))
+    body_surf = font.render(body_text, True, (200, 220, 100))
+    bg_w = max(label_surf.get_width(), body_surf.get_width()) + 40
+    bg_h = label_surf.get_height() + body_surf.get_height() + 32
+    bg_x = (WIDTH - bg_w) // 2
+    bg_y = (HEIGHT - bg_h) // 2 - 60
+    bg = pygame.Surface((bg_w, bg_h), pygame.SRCALPHA)
+    bg.fill((0, 0, 0, 220))
+    surf.blit(bg, (bg_x, bg_y))
+    pygame.draw.rect(surf, (200, 220, 100), (bg_x, bg_y, bg_w, bg_h), 2)
+    surf.blit(label_surf, (bg_x + 20, bg_y + 12))
+    surf.blit(body_surf, (bg_x + 20,
+                          bg_y + 12 + label_surf.get_height() + 8))
+
+
+def draw_hud_message(surf: pygame.Surface, font: pygame.font.Font,
+                     text: str) -> None:
+    """Centered toast at the bottom of the screen. Used by F2/F3 to confirm
+    save/load and by version-mismatch warnings."""
+    msg = font.render(text, True, (230, 230, 230))
+    bg_w = msg.get_width() + 28
+    bg_h = msg.get_height() + 16
+    bg_x = (WIDTH - bg_w) // 2
+    bg_y = HEIGHT - bg_h - 64
+    bg = pygame.Surface((bg_w, bg_h), pygame.SRCALPHA)
+    bg.fill((0, 0, 0, 180))
+    surf.blit(bg, (bg_x, bg_y))
+    pygame.draw.rect(surf, (140, 140, 140),
+                     (bg_x, bg_y, bg_w, bg_h), 1)
+    surf.blit(msg, (bg_x + 14, bg_y + 8))
+
+
 def main() -> None:
     global WIDTH, HEIGHT
     pygame.init()
@@ -2403,7 +3074,14 @@ def main() -> None:
     font = pygame.font.SysFont("consolas,menlo,monospace", 18)
 
     sim_time = 0.0
-    bodies, planet, sun, deposits, pads, turrets, bullets, enemies = build_world()
+    # Active universe spec; updated by R / Shift+R / F2. Stored on save so
+    # quickloads of a random universe re-seed the same generator. The
+    # `planet` slot in the build_world_for return is the "starter" body
+    # (innermost landable) regardless of universe -- ship spawns there.
+    current_universe: dict = {"type": "default"}
+    bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+        build_world_for(current_universe)
+    )
     ship = Ship(planet)
     stars = Starfield()
     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
@@ -2416,6 +3094,16 @@ def main() -> None:
 
     fullscreen = False
     hud_visible = True
+    # (text, expires-at wall-clock time). draw_hud_message renders this if
+    # set + unexpired, then it self-clears. Used for F2/F3 toast feedback
+    # and the version-mismatch warning.
+    hud_message: tuple[str, float] | None = None
+    # Custom-seed text-entry mode (Ctrl+Shift+R). While active the sim
+    # freezes, all keystrokes route to the prompt buffer (digits append,
+    # Backspace pops, Enter commits, Esc cancels), and draw_seed_prompt
+    # paints a modal overlay on top of the regular UI.
+    seed_prompt_active = False
+    seed_prompt_buffer = ""
     predict_seconds = PREDICT_SECONDS
     predict_target_steps = PREDICT_TARGET_STEPS
     time_scale = TIME_SCALE_DEFAULT
@@ -2498,11 +3186,82 @@ def main() -> None:
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
+                if seed_prompt_active:
+                    # Modal text-entry: while the seed prompt is open,
+                    # ALL keys route through here so a stray W/S/Esc
+                    # while typing a seed can't fly the ship or quit
+                    # the game. Esc cancels, Enter commits, BS pops,
+                    # digits append (12-char cap covers any 32-bit
+                    # seed comfortably).
+                    if event.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                        if seed_prompt_buffer:
+                            try:
+                                seed = int(seed_prompt_buffer)
+                            except ValueError:
+                                seed = None
+                            if seed is not None:
+                                sim_time = 0.0
+                                current_universe = {
+                                    "type": "random", "seed": seed,
+                                }
+                                bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+                                    build_world_for(current_universe)
+                                )
+                                ship.reset(planet)
+                                enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
+                                kills = 0
+                                paused = False
+                                plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                                maneuver_queue.clear()
+                                plan_burn_offset = 0.0
+                                time_scale = TIME_SCALE_DEFAULT
+                                predict_cache["age"] = PREDICT_CACHE_INTERVAL
+                                hud_message = (
+                                    f"random universe: seed {seed}",
+                                    time.time() + HUD_MESSAGE_DURATION,
+                                )
+                            else:
+                                hud_message = (
+                                    "invalid seed",
+                                    time.time() + HUD_MESSAGE_DURATION,
+                                )
+                        seed_prompt_active = False
+                        seed_prompt_buffer = ""
+                    elif event.key == pygame.K_ESCAPE:
+                        seed_prompt_active = False
+                        seed_prompt_buffer = ""
+                    elif event.key == pygame.K_BACKSPACE:
+                        seed_prompt_buffer = seed_prompt_buffer[:-1]
+                    elif (event.unicode and event.unicode.isdigit()
+                            and len(seed_prompt_buffer) < 12):
+                        seed_prompt_buffer += event.unicode
+                    continue  # don't fall through to the normal handlers
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_r:
+                    # R           = default universe
+                    # Shift+R     = freshly-rolled random universe
+                    # Ctrl+Shift+R = open the custom-seed prompt (modal,
+                    #                freezes sim until commit/cancel) so a
+                    #                specific seed can be re-summoned.
+                    if (event.mod & pygame.KMOD_CTRL
+                            and event.mod & pygame.KMOD_SHIFT):
+                        seed_prompt_active = True
+                        seed_prompt_buffer = ""
+                        continue
                     sim_time = 0.0
-                    bodies, planet, sun, deposits, pads, turrets, bullets, enemies = build_world()
+                    if event.mod & pygame.KMOD_SHIFT:
+                        seed = random.randrange(2 ** 31)
+                        current_universe = {"type": "random", "seed": seed}
+                        hud_message = (
+                            f"random universe: seed {seed}",
+                            time.time() + HUD_MESSAGE_DURATION,
+                        )
+                    else:
+                        current_universe = {"type": "default"}
+                    bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+                        build_world_for(current_universe)
+                    )
                     ship.reset(planet)
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                     kills = 0
@@ -2511,6 +3270,7 @@ def main() -> None:
                     maneuver_queue.clear()
                     plan_burn_offset = 0.0
                     time_scale = TIME_SCALE_DEFAULT
+                    predict_cache["age"] = PREDICT_CACHE_INTERVAL
                 elif event.key == pygame.K_SPACE:
                     # Leaving plan mode without committing -> drop any
                     # queued chain. Re-entering pause starts fresh.
@@ -2706,6 +3466,99 @@ def main() -> None:
                     paused = False
                 elif event.key == pygame.K_F1:
                     hud_visible = not hud_visible
+                elif event.key == pygame.K_F2:
+                    # Quickload: replace live state from disk. The save was
+                    # written at the END of a frame (any frame F3 was pressed
+                    # in), so loading at start-of-frame here puts us in the
+                    # equivalent moment on a fresh frame -- no partial-tick
+                    # bisection. predict_cache is force-refreshed since the
+                    # whole sim just teleported.
+                    save_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        SAVES_DIR, QUICKSAVE_NAME + ".json",
+                    )
+                    loaded = load_session_file(save_path)
+                    if loaded is None:
+                        hud_message = ("no quicksave",
+                                       time.time() + HUD_MESSAGE_DURATION)
+                    else:
+                        # Phase 1 -- rebuild the universe from the saved
+                        # spec BEFORE overlaying state. apply_session looks
+                        # up bodies by name (Ship.landed_body, brake-assist
+                        # target, etc.), so the body set has to match what
+                        # was saved against. Reassigning the eight world
+                        # references in main()'s frame here cleanly swaps
+                        # in the right Body / Deposit / pad / turret list
+                        # objects; apply_session then mutates these in
+                        # place to overlay sim state.
+                        loaded_universe = loaded.get(
+                            "universe", {"type": "default"}
+                        )
+                        bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+                            build_world_for(loaded_universe)
+                        )
+                        current_universe = loaded_universe
+                        # Phase 2 -- overlay sim state onto the freshly
+                        # built world.
+                        result = apply_session(
+                            loaded, ship, camera, bodies, deposits,
+                            pads, turrets, enemies, bullets, maneuver_queue,
+                        )
+                        sim_time = result["sim_time"]
+                        paused = result["paused"]
+                        plan_burn_duration = result["plan_burn_duration"]
+                        plan_burn_offset = result["plan_burn_offset"]
+                        kills = result["kills"]
+                        enemies_enabled = result["enemies_enabled"]
+                        enemy_spawn_timer = result["enemy_spawn_timer"]
+                        predict_seconds = result["predict_seconds"]
+                        predict_target_steps = result["predict_target_steps"]
+                        time_scale = result["time_scale"]
+                        hud_visible = result["hud_visible"]
+                        physics_accumulator = 0.0
+                        predict_cache["age"] = PREDICT_CACHE_INTERVAL
+                        # Toast priority: warnings (most actionable) >
+                        # version mismatch > plain success.
+                        warns = result.get("warnings", [])
+                        if warns:
+                            hud_message = (
+                                f"loaded with warning: {warns[0]}",
+                                time.time() + HUD_MESSAGE_DURATION,
+                            )
+                        elif result["partial"]:
+                            hud_message = (
+                                f"save partially restored "
+                                f"(v{result['saved_version']} -> v{SAVE_VERSION})",
+                                time.time() + HUD_MESSAGE_DURATION,
+                            )
+                        else:
+                            hud_message = (
+                                "QUICKLOADED",
+                                time.time() + HUD_MESSAGE_DURATION,
+                            )
+                elif event.key == pygame.K_F3:
+                    # Quicksave: snapshot live state to disk. Written
+                    # atomically (.tmp -> rename, with .bak rotation) so a
+                    # crash mid-write can't corrupt the active slot.
+                    save_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)),
+                        SAVES_DIR, QUICKSAVE_NAME + ".json",
+                    )
+                    try:
+                        save_session(
+                            save_path, current_universe,
+                            sim_time, ship, camera, deposits,
+                            pads, turrets, enemies, kills, enemies_enabled,
+                            enemy_spawn_timer, paused, plan_burn_duration,
+                            plan_burn_offset, maneuver_queue,
+                            predict_seconds, predict_target_steps,
+                            time_scale, hud_visible,
+                        )
+                        hud_message = ("QUICKSAVED",
+                                       time.time() + HUD_MESSAGE_DURATION)
+                    except OSError as ex:
+                        hud_message = (f"save failed: {ex}",
+                                       time.time() + HUD_MESSAGE_DURATION)
                 elif event.key == pygame.K_F4:
                     pygame.display.iconify()
                 elif event.key == pygame.K_F5:
@@ -2785,7 +3638,7 @@ def main() -> None:
         # enemies, bullets, turrets, fuel/refuel. Time t doesn't advance, so
         # body rails stay frozen too. The render block still runs and draws
         # an alternate trajectory based on the planned burn.
-        if not in_build_mode and not paused:
+        if not in_build_mode and not paused and not seed_prompt_active:
             # Feed measured wall time into the accumulator (scaled by
             # time_scale, capped at MAX_FRAME_DT) and run as many fixed
             # PHYSICS_DT ticks as fit. The predictor uses the same
@@ -3189,7 +4042,8 @@ def main() -> None:
                      chain_burn_count=chain_burn_count,
                      pending_count=len(ship.pending_maneuvers),
                      plan_burn_offset=plan_burn_offset,
-                     time_scale=time_scale)
+                     time_scale=time_scale,
+                     universe_spec=current_universe)
 
         if in_build_mode:
             btn_rect, can_afford = draw_build_menu(screen, font, ship)
@@ -3201,6 +4055,22 @@ def main() -> None:
                     new_t = Turret(candidate_pad.body, candidate_pad.angle)
                     candidate_pad.turret = new_t
                     turrets.append(new_t)
+
+        # Custom-seed entry overlay (Ctrl+Shift+R). Drawn above the HUD
+        # and any toast so the modal is unambiguous; below REC so a
+        # recording-in-progress still wins the corner.
+        if seed_prompt_active:
+            draw_seed_prompt(screen, font, seed_prompt_buffer)
+
+        # Transient toast for F2/F3 (and version-mismatch warning). Drawn
+        # above the HUD/build menu so it reads clearly, but below the REC
+        # indicator so an in-progress recording stays visually on top.
+        if hud_message is not None:
+            msg_text, msg_expires = hud_message
+            if time.time() < msg_expires:
+                draw_hud_message(screen, font, msg_text)
+            else:
+                hud_message = None
 
         # Recording indicator: small red dot + counts in the top-right.
         # Drawn after every other UI element so it appears in the recorded
