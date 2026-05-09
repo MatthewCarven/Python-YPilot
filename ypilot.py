@@ -41,7 +41,13 @@ Controls:
                        to the orange-line plan you just fired. Cancels on
                        W/S like brake-assist; mutually exclusive with H.
                        No-op if no plan committed yet, or if landed.
-    B (hold)           build mode while landed near an unoccupied build pad
+    B (hold)           build mode while landed near an unoccupied build pad.
+                       Two options: "Dumb Turret" (50 ore, anti-UFO) and
+                       "Missile Printer" (150 ore, anti-AA + anti-UFO).
+                       Printers cost 30 ore per launch and auto-fire at
+                       the nearest hostile within 5000 units. Each missile
+                       gets its own bespoke flight plan (orange trail) and
+                       flies it under gravity.
     + / =              zoom in
     - / _              zoom out
     0                  reset zoom to 1.0
@@ -54,6 +60,16 @@ Controls:
     /                  shorter trajectory prediction window (down to 5s)
     *                  longer trajectory prediction window (up to 5min)
     F1                 toggle HUD text overlay (world content stays visible)
+    F2 / F3            quickload / quicksave to the default slot
+                       (saves/quicksave.json -- the legacy single-slot
+                       behaviour, untouched).
+    Ctrl + F1..F9      save to numbered slot N (saves/quicksave_N.json).
+                       Use slots 1-9 to bookmark expedition states you
+                       want to revisit (apo-burn ready, frostbite return,
+                       mid-mining, etc). HUD toasts "SAVED slot N".
+    Shift + F1..F9     load from numbered slot N. HUD toasts "LOADED
+                       slot N", or "no save in slot N" if the slot file
+                       doesn't exist yet.
     F4                 minimise window (boss key)
     F5 / F6            halve / double the predictor's step budget; coarser
                        steps are cheaper but less faithful, finer steps cost
@@ -64,6 +80,12 @@ Controls:
                        paused is paused. Current value shown on HUD when
                        not 1.0x. R resets back to 1.0x.
     F10                toggle enemy spawns (also clears any in scene)
+    Shift + F10        toggle planetary AA batteries. ~50% of landable
+                       bodies are rolled with a battery at world build
+                       (deterministic from the world seed). Each shows a
+                       red dot + barrel; while tracking you, they paint
+                       a 1s targeting laser to the predicted intercept
+                       before firing. Burning (W/S) breaks the lock.
     Space              pause + plan-mode "what-if" overlay. Mouse aims a
                        burn direction; an orange ghost trajectory shows where
                        the ship would end up if it received an instantaneous
@@ -441,6 +463,56 @@ BULLET_SPEED = 280.0
 BULLET_LIFETIME = 2.5
 BULLET_RADIUS = 2.0
 BULLET_COLOR = (255, 230, 130)
+
+# --- Missile printer (player-built counter to AA / UFOs) ------------------
+# Build on a pad like a Turret, but pricier and longer-ranged. Autonomously
+# fires guided missiles at the nearest hostile (AA battery > UFO). Each shot
+# costs ore at fire-time so the structure remains a sustained drain on the
+# economy, not a fire-and-forget weapon.
+MISSILE_PRINTER_COST       = 150.0
+MISSILE_PRINTER_RANGE      = 5000.0
+MISSILE_PRINTER_COOLDOWN   = 8.0
+MISSILE_PRINTER_SCAN_INT   = 0.5
+MISSILE_ORE_COST           = 30.0
+MISSILE_PRINTER_BODY       = 11.0
+MISSILE_PRINTER_BARREL_LEN = 18.0
+MISSILE_PRINTER_COLOR      = (200, 130, 60)
+MISSILE_PRINTER_RIM        = (110, 60, 20)
+MISSILE_PRINTER_BARREL_COL = (170, 100, 40)
+
+# --- Missile (the projectile itself) --------------------------------------
+# Constant thrust toward a STATIC aim-point computed at launch. Same gravity
+# sampler + same thrust law in both planner and live update -> live flight is
+# bit-equivalent to the planned line, so we don't need PD path-hold.
+MISSILE_LAUNCH_SPEED       = 90.0
+MISSILE_THRUST             = 220.0
+MISSILE_LIFETIME           = 18.0
+MISSILE_BLAST_RADIUS       = 18.0
+MISSILE_RADIUS             = 3.0
+MISSILE_PLAN_HORIZON       = 12.0    # seconds to predict at launch
+MISSILE_PLAN_SOLVE_ITERS   = 5       # intercept-solver iteration cap
+MISSILE_COLOR              = (255, 200, 100)
+MISSILE_PLAN_COLOR         = (160, 110, 40)
+
+# --- Planetary AA battery --------------------------------------------------
+# Stationary, body-mounted defenders rolled per-world. Telegraph their shot
+# with a visible targeting laser for BATTERY_LASER_DURATION before firing,
+# so a paying-attention pilot can dodge by burning (the firing solution
+# uses the gravity-affected predictor against straight-line bullets, and
+# refuses to converge during a ship burn -- that's the escape hatch).
+BATTERY_RANGE             = 2400.0          # ~6.3x TURRET_RANGE
+BATTERY_FIRE_COOLDOWN     = 4.0             # seconds between shots
+BATTERY_LASER_DURATION    = 1.0             # telegraph window before firing
+BATTERY_SOLVE_INTERVAL    = 0.25            # idle solve cadence (seconds)
+BATTERY_SOLVE_MAX_ITERS   = 6               # intercept iteration cap
+BATTERY_PREDICT_STEPS     = 120             # coarse predictor for solver
+BATTERY_BODY              = 9.0
+BATTERY_BARREL_LEN        = 16.0
+BATTERY_SPAWN_PROBABILITY = 0.5             # rolled per landable body
+BATTERY_COLOR             = (200, 60, 60)
+BATTERY_RIM               = (90, 20, 20)
+BATTERY_BARREL_COLOR      = (140, 40, 40)
+BATTERY_LASER_COLOR       = (255, 80, 80)
 
 # --- Enemy -----------------------------------------------------------------
 ENEMY_RADIUS = 7.0
@@ -993,7 +1065,11 @@ class BuildPad:
     def __init__(self, body: Body, angle: float):
         self.body = body
         self.angle = angle
+        # Pads carry one structure of either type. Kept as parallel slots
+        # (rather than a unified `structure` field) so existing turret
+        # save/load + nearest-pad logic keeps reading `pad.turret`.
         self.turret = None
+        self.printer = None
 
     @property
     def pos(self) -> Vector2:
@@ -1003,15 +1079,20 @@ class BuildPad:
 
     @property
     def occupied(self) -> bool:
-        return self.turret is not None and self.turret.alive
+        return ((self.turret is not None and self.turret.alive)
+                or (self.printer is not None and self.printer.alive))
 
 
 class Bullet:
-    def __init__(self, pos: Vector2, vel: Vector2):
+    def __init__(self, pos: Vector2, vel: Vector2, hostile: bool = False):
         self.pos = Vector2(pos)
         self.vel = Vector2(vel)
         self.lifetime = BULLET_LIFETIME
         self.alive = True
+        # hostile=True bullets check ship-collision; non-hostile (default,
+        # turret-fired) bullets check enemy-collision. Keeps friendly fire
+        # impossible without splitting the class.
+        self.hostile = hostile
 
     def update(self, dt: float) -> None:
         self.pos += self.vel * dt
@@ -1124,6 +1205,334 @@ class Turret:
         muzzle_dir = Vector2(math.cos(self.angle), math.sin(self.angle))
         muzzle_pos = self.pos + muzzle_dir * TURRET_BARREL_LEN
         bullets.append(Bullet(muzzle_pos, muzzle_dir * BULLET_SPEED))
+
+
+class PlanetaryBattery:
+    """Body-mounted anti-ship defender. State machine:
+        idle      -> probe for an intercept every BATTERY_SOLVE_INTERVAL
+        tracking  -> laser visible, re-solve every frame; fire when the
+                     telegraph window expires AND the latest solve is valid
+        cooldown  -> hold for BATTERY_FIRE_COOLDOWN, then idle
+
+    The intercept solver iterates against ship.predict_trajectory (which
+    *is* gravity-aware) using straight-line bullet flight time. Convergence
+    fails during ship burns, which is the player's dodge escape -- the
+    laser drops, no shot fires.
+    """
+
+    def __init__(self, body: Body, mount_angle: float):
+        self.body = body
+        self.mount_angle = mount_angle
+        self.state = "idle"
+        self.state_timer = 0.0
+        self.solve_age = BATTERY_SOLVE_INTERVAL  # force solve on first tick
+        self.aim_point: Vector2 | None = None
+        self.aim_lead = 0.0
+        self.fire_cooldown = 0.0
+        self.alive = True
+
+    @property
+    def pos(self) -> Vector2:
+        return self.body.pos + Vector2(
+            math.cos(self.mount_angle), math.sin(self.mount_angle)
+        ) * (self.body.radius + 4.0)
+
+    def _solve_intercept(self, ship: "Ship", bodies: list[Body],
+                         sim_time: float) -> tuple[Vector2 | None, float]:
+        # Horizon: max time a bullet could spend in flight at BATTERY_RANGE
+        # plus a 1.5x safety factor for solver stability when the ship is
+        # diving toward the battery.
+        horizon = BATTERY_RANGE / max(BULLET_SPEED, 1e-3) * 1.5
+        pts, _, dt_used = ship.predict_trajectory(
+            bodies, sim_time, seconds=horizon,
+            pos0=ship.pos, vel0=ship.vel,
+            target_steps=BATTERY_PREDICT_STEPS,
+        )
+        if not pts or dt_used <= 0.0:
+            return None, 0.0
+        origin = self.pos  # bullet leaves NOW from current battery position
+        t_lead = (ship.pos - origin).length() / max(BULLET_SPEED, 1e-3)
+        last = len(pts) - 1
+        for _ in range(BATTERY_SOLVE_MAX_ITERS):
+            i = max(0, min(last, int(round(t_lead / dt_used))))
+            target = pts[i]
+            new_lead = (target - origin).length() / max(BULLET_SPEED, 1e-3)
+            if abs(new_lead - t_lead) < dt_used:
+                if new_lead * BULLET_SPEED > BATTERY_RANGE:
+                    return None, 0.0
+                return Vector2(target), new_lead
+            t_lead = new_lead
+        return None, 0.0
+
+    def update(self, dt: float, ship: "Ship", bodies: list[Body],
+               sim_time: float, bullets: list[Bullet]) -> None:
+        if not self.alive or not ship.alive:
+            self.aim_point = None
+            return
+
+        if self.state == "cooldown":
+            self.state_timer -= dt
+            if self.state_timer <= 0.0:
+                self.state = "idle"
+                self.solve_age = BATTERY_SOLVE_INTERVAL
+            return
+
+        if self.state == "idle":
+            self.aim_point = None
+            self.solve_age += dt
+            if self.solve_age >= BATTERY_SOLVE_INTERVAL:
+                self.solve_age = 0.0
+                aim, lead = self._solve_intercept(ship, bodies, sim_time)
+                if aim is not None:
+                    self.aim_point = aim
+                    self.aim_lead = lead
+                    self.state = "tracking"
+                    self.state_timer = BATTERY_LASER_DURATION
+            return
+
+        # tracking
+        aim, lead = self._solve_intercept(ship, bodies, sim_time)
+        if aim is None:
+            # Ship burning / out of range -- give up the lock, laser drops.
+            self.state = "idle"
+            self.aim_point = None
+            self.solve_age = 0.0
+            return
+        self.aim_point = aim
+        self.aim_lead = lead
+        self.state_timer -= dt
+        if self.state_timer <= 0.0:
+            self._fire(bullets)
+            self.state = "cooldown"
+            self.state_timer = BATTERY_FIRE_COOLDOWN
+
+    def _fire(self, bullets: list[Bullet]) -> None:
+        if self.aim_point is None:
+            return
+        origin = self.pos
+        to_target = self.aim_point - origin
+        if to_target.length_squared() < 1e-6:
+            return
+        muzzle_dir = to_target.normalize()
+        muzzle_pos = origin + muzzle_dir * BATTERY_BARREL_LEN
+        bullets.append(
+            Bullet(muzzle_pos, muzzle_dir * BULLET_SPEED, hostile=True)
+        )
+
+
+class Missile:
+    """Player-friendly guided projectile fired by MissilePrinter.
+
+    Constant-thrust law toward a STATIC aim-point chosen at launch. Live
+    update mirrors the planner step-for-step (same gravity sampler, same
+    thrust formula, same PHYSICS_DT) so the planned trajectory drawn at
+    launch is bit-equivalent to the actual flight -- no PD path-hold,
+    no per-frame re-targeting, the sim *is* the plan.
+    """
+
+    def __init__(self, pos: Vector2, vel: Vector2, aim_point: Vector2,
+                 planned_trajectory: list[Vector2]):
+        self.pos = Vector2(pos)
+        self.vel = Vector2(vel)
+        self.aim_point = Vector2(aim_point)
+        self.planned_trajectory = planned_trajectory
+        self.lifetime = MISSILE_LIFETIME
+        self.alive = True
+
+    def _accel(self, pos: Vector2, t: float, bodies: list[Body]) -> Vector2:
+        a = gravity_at_t(pos, t, bodies)
+        to_aim = self.aim_point - pos
+        d2 = to_aim.length_squared()
+        if d2 > 1.0:
+            a = a + to_aim * (MISSILE_THRUST / math.sqrt(d2))
+        return a
+
+    def update(self, dt: float, sim_time: float,
+               bodies: list[Body]) -> None:
+        if not self.alive:
+            return
+        # Leapfrog with body sampling at step end (matches predictor).
+        t2 = sim_time + dt
+        a0 = self._accel(self.pos, t2, bodies)
+        v_half = self.vel + a0 * (dt * 0.5)
+        self.pos = self.pos + v_half * dt
+        a1 = self._accel(self.pos, t2, bodies)
+        self.vel = v_half + a1 * (dt * 0.5)
+
+        # Body collision: missiles are solid, terrain is solid.
+        for body in bodies:
+            if (self.pos - body.pos).length() <= body.radius + MISSILE_RADIUS:
+                self.alive = False
+                return
+
+        self.lifetime -= dt
+        if self.lifetime <= 0.0:
+            self.alive = False
+
+
+def _missile_target_at(target, sim_time: float, t: float) -> Vector2:
+    """Predict a target's position at absolute time t. AA batteries ride
+    their host body via position_at(); UFOs use straight-line arcade
+    extrapolation from current vel.
+    """
+    if isinstance(target, PlanetaryBattery):
+        bp = target.body.position_at(t)
+        radial = Vector2(math.cos(target.mount_angle),
+                         math.sin(target.mount_angle))
+        return bp + radial * (target.body.radius + 4.0)
+    # UFO / Enemy
+    return target.pos + target.vel * (t - sim_time)
+
+
+def plan_missile_flight(launch_pos: Vector2, target,
+                        sim_time: float, bodies: list[Body]
+                        ) -> tuple[Vector2, Vector2, list[Vector2]] | None:
+    """Solve an intercept and snapshot the missile's trajectory.
+
+    Iterates: predict target position at sim_time + t_lead, recompute
+    t_lead from the new geometry, repeat. Then runs the missile predictor
+    (same step structure as Missile.update) forward MISSILE_PLAN_HORIZON
+    seconds and returns (initial_velocity, aim_point, samples).
+
+    Returns None if the solver can't converge (e.g. zero-distance
+    geometry).
+    """
+    target_pos_now = _missile_target_at(target, sim_time, sim_time)
+    dist0 = (target_pos_now - launch_pos).length()
+    if dist0 < 1e-3:
+        return None
+    # Seed t_lead with a straight-line estimate using launch speed; the
+    # solver tightens it from there.
+    t_lead = dist0 / max(MISSILE_LAUNCH_SPEED, 1e-3)
+    aim_point = _missile_target_at(target, sim_time, sim_time + t_lead)
+    for _ in range(MISSILE_PLAN_SOLVE_ITERS):
+        new_lead = (aim_point - launch_pos).length() / max(MISSILE_LAUNCH_SPEED, 1e-3)
+        new_aim = _missile_target_at(target, sim_time, sim_time + new_lead)
+        if (new_aim - aim_point).length_squared() < 1.0:
+            aim_point = new_aim
+            t_lead = new_lead
+            break
+        aim_point = new_aim
+        t_lead = new_lead
+
+    to_aim = aim_point - launch_pos
+    if to_aim.length_squared() < 1e-3:
+        return None
+    vel0 = to_aim.normalize() * MISSILE_LAUNCH_SPEED
+
+    # Forward integrate the missile under the same accel law it'll fly
+    # live. Sample positions for the orange planned-trajectory line.
+    pos = Vector2(launch_pos)
+    vel = Vector2(vel0)
+    n = max(2, int(MISSILE_PLAN_HORIZON / PHYSICS_DT))
+    samples = [Vector2(pos)]
+    for i in range(n):
+        t2 = sim_time + (i + 1) * PHYSICS_DT
+        # Replicate Missile._accel exactly (don't refactor without keeping
+        # them in lockstep; planner/live divergence breaks the visual).
+        def _accel(p):
+            a = gravity_at_t(p, t2, bodies)
+            to_a = aim_point - p
+            d2 = to_a.length_squared()
+            if d2 > 1.0:
+                a = a + to_a * (MISSILE_THRUST / math.sqrt(d2))
+            return a
+        a0 = _accel(pos)
+        v_half = vel + a0 * (PHYSICS_DT * 0.5)
+        pos = pos + v_half * PHYSICS_DT
+        a1 = _accel(pos)
+        vel = v_half + a1 * (PHYSICS_DT * 0.5)
+        samples.append(Vector2(pos))
+        # Bail early if the planned path hits a body -- gives a cleaner
+        # trail and signals a self-intersection at fire time.
+        bail = False
+        for body in bodies:
+            if (pos - body.position_at(t2)).length() <= body.radius + MISSILE_RADIUS:
+                bail = True
+                break
+        if bail:
+            break
+
+    return vel0, aim_point, samples
+
+
+class MissilePrinter:
+    """Body-mounted, autonomous launcher built by the player on a pad.
+    Scans for hostiles every MISSILE_PRINTER_SCAN_INT seconds, fires a
+    guided missile at the nearest one whenever the cooldown is up AND
+    the player has MISSILE_ORE_COST ore to spend.
+    """
+
+    def __init__(self, body: Body, mount_angle: float):
+        self.body = body
+        self.mount_angle = mount_angle
+        self.launch_cooldown = 0.0
+        self.scan_age = MISSILE_PRINTER_SCAN_INT  # scan on first tick
+        self.alive = True
+
+    @property
+    def pos(self) -> Vector2:
+        return self.body.pos + Vector2(
+            math.cos(self.mount_angle), math.sin(self.mount_angle)
+        ) * (self.body.radius + 2.0)
+
+    def _pick_target(self, batteries: list["PlanetaryBattery"],
+                     enemies: list[Enemy]):
+        my_pos = self.pos
+        best = None
+        best_d2 = MISSILE_PRINTER_RANGE * MISSILE_PRINTER_RANGE
+        # Priority: AA batteries first (the whole point of the weapon).
+        for bat in batteries:
+            if not bat.alive:
+                continue
+            d2 = (bat.pos - my_pos).length_squared()
+            if d2 <= best_d2:
+                best_d2 = d2
+                best = bat
+        if best is not None:
+            return best
+        # Fallback tier: nearest UFO.
+        best_d2 = MISSILE_PRINTER_RANGE * MISSILE_PRINTER_RANGE
+        for e in enemies:
+            if not e.alive:
+                continue
+            d2 = (e.pos - my_pos).length_squared()
+            if d2 <= best_d2:
+                best_d2 = d2
+                best = e
+        return best
+
+    def update(self, dt: float, ship: "Ship", bodies: list[Body],
+               batteries: list["PlanetaryBattery"], enemies: list[Enemy],
+               missiles: list[Missile], sim_time: float) -> None:
+        if not self.alive:
+            return
+        if self.launch_cooldown > 0.0:
+            self.launch_cooldown = max(0.0, self.launch_cooldown - dt)
+            return
+        self.scan_age += dt
+        if self.scan_age < MISSILE_PRINTER_SCAN_INT:
+            return
+        self.scan_age = 0.0
+
+        target = self._pick_target(batteries, enemies)
+        if target is None:
+            return
+        if ship.ore < MISSILE_ORE_COST:
+            return
+
+        plan = plan_missile_flight(self.pos, target, sim_time, bodies)
+        if plan is None:
+            return
+        vel0, aim_point, samples = plan
+        # Pay only when we commit to launching. Discount and fire.
+        ship.ore = max(0.0, ship.ore - MISSILE_ORE_COST)
+        # Spawn slightly in front of the muzzle so the missile doesn't
+        # immediately self-collide with its host body.
+        muzzle_dir = vel0.normalize() if vel0.length_squared() > 1e-6 else Vector2(0.0, -1.0)
+        muzzle_pos = self.pos + muzzle_dir * MISSILE_PRINTER_BARREL_LEN
+        missiles.append(Missile(muzzle_pos, vel0, aim_point, samples))
+        self.launch_cooldown = MISSILE_PRINTER_COOLDOWN
 
 
 def generate_deposits(body: Body, n: int = NUM_DEPOSITS) -> list:
@@ -1961,6 +2370,82 @@ def draw_turret(surf: pygame.Surface, camera: Camera, t: Turret) -> None:
                      max(1, int(camera.scale(3))))
 
 
+def draw_missile_printer(surf: pygame.Surface, camera: Camera,
+                         p: MissilePrinter) -> None:
+    if not p.alive:
+        return
+    pos = p.pos
+    sx, sy = camera.world_to_screen(pos)
+    body_r = max(1, int(camera.scale(MISSILE_PRINTER_BODY)))
+    radial = Vector2(math.cos(p.mount_angle), math.sin(p.mount_angle))
+    end = pos + radial * MISSILE_PRINTER_BARREL_LEN
+    ex, ey = camera.world_to_screen(end)
+    pygame.draw.line(surf, MISSILE_PRINTER_BARREL_COL,
+                     (int(sx), int(sy)), (int(ex), int(ey)),
+                     max(1, int(camera.scale(4))))
+    pygame.draw.circle(surf, MISSILE_PRINTER_COLOR,
+                       (int(sx), int(sy)), body_r)
+    pygame.draw.circle(surf, MISSILE_PRINTER_RIM,
+                       (int(sx), int(sy)), body_r, 1)
+
+
+def draw_missile(surf: pygame.Surface, camera: Camera, m: Missile) -> None:
+    if not m.alive:
+        return
+    # Planned-trajectory polyline in dim orange. Drawn first so the
+    # missile body sits on top.
+    if len(m.planned_trajectory) >= 2:
+        pts = [camera.world_to_screen_int(p) for p in m.planned_trajectory]
+        pygame.draw.lines(surf, MISSILE_PLAN_COLOR, False, pts, 1)
+    sx, sy = camera.world_to_screen(m.pos)
+    if m.vel.length_squared() > 1e-3:
+        fwd = m.vel.normalize()
+    else:
+        fwd = Vector2(0.0, -1.0)
+    side = Vector2(-fwd.y, fwd.x)
+    nose = m.pos + fwd * 8.0
+    left = m.pos - fwd * 4.0 + side * 3.0
+    right = m.pos - fwd * 4.0 - side * 3.0
+    pts = [camera.world_to_screen(p) for p in (nose, left, right)]
+    pygame.draw.polygon(surf, MISSILE_COLOR, pts)
+
+
+def draw_battery(surf: pygame.Surface, camera: Camera,
+                 bat: PlanetaryBattery) -> None:
+    if not bat.alive:
+        return
+    pos = bat.pos
+    sx, sy = camera.world_to_screen(pos)
+    body_r = max(1, int(camera.scale(BATTERY_BODY)))
+    # Outward-pointing barrel along the mount angle so the silhouette reads
+    # as "fixed gun bolted to a planet" rather than "rotating turret".
+    radial = Vector2(math.cos(bat.mount_angle), math.sin(bat.mount_angle))
+    end = pos + radial * BATTERY_BARREL_LEN
+    ex, ey = camera.world_to_screen(end)
+    pygame.draw.line(surf, BATTERY_BARREL_COLOR,
+                     (int(sx), int(sy)), (int(ex), int(ey)),
+                     max(1, int(camera.scale(3))))
+    pygame.draw.circle(surf, BATTERY_COLOR, (int(sx), int(sy)), body_r)
+    pygame.draw.circle(surf, BATTERY_RIM, (int(sx), int(sy)), body_r, 1)
+
+    # Targeting laser: a thin line from battery to predicted intercept.
+    # Drawn ONLY in the tracking state -- player's tell that a shot is
+    # imminent. Brightness ramps from dim->bright over the telegraph
+    # window so the eye picks up the threat as it locks in.
+    if bat.state == "tracking" and bat.aim_point is not None:
+        ax, ay = camera.world_to_screen(bat.aim_point)
+        progress = 1.0 - max(0.0, min(1.0,
+            bat.state_timer / max(BATTERY_LASER_DURATION, 1e-3)
+        ))
+        # Lerp a dim-to-bright red along the laser
+        base = BATTERY_LASER_COLOR
+        r = int(80 + (base[0] - 80) * progress)
+        g = int(20 + (base[1] - 20) * progress)
+        b = int(20 + (base[2] - 20) * progress)
+        pygame.draw.line(surf, (r, g, b),
+                         (int(sx), int(sy)), (int(ax), int(ay)), 1)
+
+
 def draw_bullet(surf: pygame.Surface, camera: Camera, b: Bullet) -> None:
     sx, sy = camera.world_to_screen(b.pos)
     pygame.draw.circle(surf, BULLET_COLOR, (int(sx), int(sy)),
@@ -2383,38 +2868,59 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
         draw_fuel_bar(surf, 16, bar_y, 220, 10, ship.fuel, MAX_FUEL)
 
 
-def draw_build_menu(surf: pygame.Surface, font: pygame.font.Font, ship: Ship) -> tuple[tuple[int, int, int, int], bool]:
+def draw_build_menu(surf: pygame.Surface, font: pygame.font.Font,
+                    ship: Ship) -> list[dict]:
+    """Render the build panel and return a list of clickable options:
+        [{"kind": str, "rect": (x,y,w,h), "cost": float, "can_afford": bool}, ...]
+    Caller iterates these on click and applies the matching purchase.
+    """
+    options_def = [
+        {"kind": "turret",  "label": "Dumb Turret",     "cost": TURRET_COST},
+        {"kind": "printer", "label": "Missile Printer", "cost": MISSILE_PRINTER_COST},
+    ]
+
+    panel_h = 60 + len(options_def) * 50 + 30  # title + buttons + status
     panel_x = (WIDTH - BUILD_PANEL_W) // 2
-    panel_y = (HEIGHT - BUILD_PANEL_H) // 2
+    panel_y = (HEIGHT - panel_h) // 2
     pygame.draw.rect(surf, BUILD_PANEL_BG,
-                     (panel_x, panel_y, BUILD_PANEL_W, BUILD_PANEL_H))
+                     (panel_x, panel_y, BUILD_PANEL_W, panel_h))
     pygame.draw.rect(surf, BUILD_PANEL_BORDER,
-                     (panel_x, panel_y, BUILD_PANEL_W, BUILD_PANEL_H), 2)
+                     (panel_x, panel_y, BUILD_PANEL_W, panel_h), 2)
 
     title = font.render("BUILD MENU  (release B to close)", True, (230, 230, 230))
     surf.blit(title, (panel_x + 16, panel_y + 12))
 
     btn_x = panel_x + 16
-    btn_y = panel_y + 50
     btn_w = BUILD_PANEL_W - 32
     btn_h = 40
-    can_afford = ship.ore >= TURRET_COST
-    btn_color = (60, 80, 110) if can_afford else (50, 50, 60)
-    pygame.draw.rect(surf, btn_color, (btn_x, btn_y, btn_w, btn_h))
-    pygame.draw.rect(surf, BUILD_PANEL_BORDER, (btn_x, btn_y, btn_w, btn_h), 1)
+    out: list[dict] = []
+    for i, opt in enumerate(options_def):
+        btn_y = panel_y + 50 + i * 50
+        can_afford = ship.ore >= opt["cost"]
+        btn_color = (60, 80, 110) if can_afford else (50, 50, 60)
+        pygame.draw.rect(surf, btn_color, (btn_x, btn_y, btn_w, btn_h))
+        pygame.draw.rect(surf, BUILD_PANEL_BORDER,
+                         (btn_x, btn_y, btn_w, btn_h), 1)
+        label_color = (220, 220, 220) if can_afford else (140, 140, 140)
+        label = font.render(
+            f"{opt['label']}  -  {opt['cost']:.0f} ore",
+            True, label_color,
+        )
+        surf.blit(label, (btn_x + 12, btn_y + 10))
+        out.append({
+            "kind": opt["kind"],
+            "rect": (btn_x, btn_y, btn_w, btn_h),
+            "cost": opt["cost"],
+            "can_afford": can_afford,
+        })
 
-    label_color = (220, 220, 220) if can_afford else (140, 140, 140)
-    label = font.render(f"Dumb Turret  -  {TURRET_COST:.0f} ore", True, label_color)
-    surf.blit(label, (btn_x + 12, btn_y + 10))
-
-    status_y = btn_y + btn_h + 14
-    status_color = (200, 220, 100) if can_afford else (220, 100, 100)
-    status_text = (f"Ore: {ship.ore:.0f}    Cost: {TURRET_COST:.0f}    "
-                   + ("CLICK TO BUILD" if can_afford else "INSUFFICIENT ORE"))
-    status = font.render(status_text, True, status_color)
+    status_y = panel_y + 50 + len(options_def) * 50 + 8
+    color = (200, 220, 100)
+    status_text = f"Ore: {ship.ore:.0f}    CLICK A BUILD OPTION"
+    status = font.render(status_text, True, color)
     surf.blit(status, (panel_x + 16, status_y))
 
-    return ((btn_x, btn_y, btn_w, btn_h), can_afford)
+    return out
 
 
 # ============================================================================
@@ -2436,7 +2942,22 @@ def nearest_unoccupied_pad(ship: Ship, pads: list[BuildPad]) -> BuildPad | None:
     return best
 
 
-def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad], list[Turret], list[Bullet], list[Enemy]]:
+def _roll_batteries(bodies: list[Body], seed: int) -> list[PlanetaryBattery]:
+    """Per-world deterministic AA roll. ~50% of landable bodies get a
+    battery; the seed is offset from the universe seed so the same world
+    seed always produces the same battery layout (default world too).
+    """
+    brng = random.Random(seed ^ 0xBA77E1F)
+    out: list[PlanetaryBattery] = []
+    for b in bodies:
+        if not b.landable:
+            continue
+        if brng.random() < BATTERY_SPAWN_PROBABILITY:
+            out.append(PlanetaryBattery(b, brng.uniform(0.0, math.tau)))
+    return out
+
+
+def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad], list[Turret], list[Bullet], list[Enemy], list[PlanetaryBattery]]:
     bodies = make_solar_system()
     sun = bodies[0]
     planet = bodies[1]
@@ -2454,12 +2975,13 @@ def build_world() -> tuple[list[Body], Body, Body, list[Deposit], list[BuildPad]
     pads = (generate_buildpads(planet)            # 5 -- main fortress
             + generate_buildpads(ember, n=3)      # 3 -- forward base
             + generate_buildpads(moon, n=2))      # 2 -- precision-landing
-    return bodies, planet, sun, deposits, pads, [], [], []
+    batteries = _roll_batteries(bodies, 0)
+    return bodies, planet, sun, deposits, pads, [], [], [], batteries
 
 
 def build_world_for(spec: dict) -> tuple[
         list[Body], Body, Body, list[Deposit], list[BuildPad],
-        list[Turret], list[Bullet], list[Enemy]]:
+        list[Turret], list[Bullet], list[Enemy], list[PlanetaryBattery]]:
     """Universe-spec-aware world builder. Returns the same 8-tuple as
     build_world(), with `starter` (innermost landable) in the Body slot
     where build_world used to return literally `planet`.
@@ -2512,7 +3034,8 @@ def build_world_for(spec: dict) -> tuple[
     for b in landable_moons:
         pads.extend(generate_buildpads(b, n=2))
 
-    return bodies, starter, sun, deposits, pads, [], [], []
+    batteries = _roll_batteries(bodies, int(spec.get("seed", 0)))
+    return bodies, starter, sun, deposits, pads, [], [], [], batteries
 
 
 # ============================================================================
@@ -2723,6 +3246,18 @@ SAVES_DIR = "saves"
 QUICKSAVE_NAME = "quicksave"
 HUD_MESSAGE_DURATION = 2.5
 
+# Save-slot scheme: slot 0 is the legacy single-slot quicksave path
+# (so old saves keep working untouched). Slots 1-9 are addressed by
+# Ctrl+F1..F9 (save) and Shift+F1..F9 (load). Stored side-by-side in
+# SAVES_DIR as quicksave_N.json, with the same .bak / .tmp rotation as
+# the default slot.
+def _save_slot_path(slot: int) -> str:
+    name = QUICKSAVE_NAME if slot == 0 else f"{QUICKSAVE_NAME}_{slot}"
+    return os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        SAVES_DIR, name + ".json",
+    )
+
 
 def _v2list(v: Vector2) -> list:
     return [v.x, v.y]
@@ -2833,16 +3368,22 @@ def save_session(path: str, universe_spec: dict, sim_time: float,
                  ship: "Ship", camera: Camera,
                  deposits: list[Deposit], pads: list[BuildPad],
                  turrets: list[Turret], enemies: list[Enemy],
-                 kills: int, enemies_enabled: bool,
+                 batteries: list[PlanetaryBattery],
+                 kills: int, enemies_enabled: bool, batteries_enabled: bool,
                  enemy_spawn_timer: float, paused: bool,
                  plan_burn_duration: float, plan_burn_offset: float,
                  maneuver_queue: list,
                  predict_seconds: float, predict_target_steps: int,
                  time_scale: float, hud_visible: bool) -> None:
     pad_idx_for_turret: dict[int, int] = {}
+    pad_idx_for_printer: dict[int, int] = {}
+    printers_alive: list[MissilePrinter] = []
     for i, p in enumerate(pads):
         if p.turret is not None:
             pad_idx_for_turret[id(p.turret)] = i
+        if p.printer is not None and p.printer.alive:
+            pad_idx_for_printer[id(p.printer)] = i
+            printers_alive.append(p.printer)
 
     data = {
         "version": SAVE_VERSION,
@@ -2865,6 +3406,16 @@ def save_session(path: str, universe_spec: dict, sim_time: float,
             }
             for t in turrets
         ],
+        "missile_printers": [
+            {
+                "pad_idx": pad_idx_for_printer.get(id(p)),
+                "body": p.body.name,
+                "mount_angle": p.mount_angle,
+                "launch_cooldown": p.launch_cooldown,
+                "alive": p.alive,
+            }
+            for p in printers_alive
+        ],
         "enemies": [
             {
                 "pos": _v2list(e.pos),
@@ -2875,9 +3426,21 @@ def save_session(path: str, universe_spec: dict, sim_time: float,
             }
             for e in enemies
         ],
+        "batteries": [
+            {
+                "body": b.body.name,
+                "mount_angle": b.mount_angle,
+                "state": b.state,
+                "state_timer": b.state_timer,
+                "fire_cooldown": b.fire_cooldown,
+                "alive": b.alive,
+            }
+            for b in batteries
+        ],
         "stats": {
             "kills": kills,
             "enemies_enabled": enemies_enabled,
+            "batteries_enabled": batteries_enabled,
             "enemy_spawn_timer": enemy_spawn_timer,
         },
         "plan_mode": {
@@ -2928,6 +3491,7 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
                   bodies: list[Body], deposits: list[Deposit],
                   pads: list[BuildPad], turrets: list[Turret],
                   enemies: list[Enemy], bullets: list[Bullet],
+                  batteries: list[PlanetaryBattery],
                   maneuver_queue: list) -> dict:
     """Apply a save dict to live mutable state in-place. Returns scalar
     fields the caller has to rebind in main()'s frame (sim_time, paused,
@@ -2959,6 +3523,7 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
 
     for p in pads:
         p.turret = None
+        p.printer = None
 
     turrets.clear()
     for tdata in data.get("turrets", []):
@@ -2974,6 +3539,20 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
         if pad_idx is not None and 0 <= pad_idx < len(pads):
             pads[pad_idx].turret = t
 
+    # Pre-feature saves won't carry "missile_printers" -- the
+    # data.get(..., []) default keeps load tolerant of older slots.
+    for pdata in data.get("missile_printers", []):
+        body = body_by_name.get(pdata.get("body"))
+        if body is None:
+            continue
+        printer = MissilePrinter(body,
+                                 float(pdata.get("mount_angle", 0.0)))
+        printer.launch_cooldown = float(pdata.get("launch_cooldown", 0.0))
+        printer.alive = bool(pdata.get("alive", True))
+        pad_idx = pdata.get("pad_idx")
+        if pad_idx is not None and 0 <= pad_idx < len(pads):
+            pads[pad_idx].printer = printer
+
     enemies.clear()
     for edata in data.get("enemies", []):
         e = Enemy(_list2v(edata["pos"]), _list2v(edata["vel"]))
@@ -2983,6 +3562,28 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
             edata.get("course_correct_timer", 0.0)
         )
         enemies.append(e)
+
+    # Pre-feature saves won't have "batteries" -- the world-build already
+    # rolled the deterministic layout, so we keep that as-is and only
+    # overlay state if the save provides it. New saves match by body name.
+    saved_bats = data.get("batteries")
+    if saved_bats is not None:
+        by_body: dict[str, list[PlanetaryBattery]] = {}
+        for b in batteries:
+            by_body.setdefault(b.body.name, []).append(b)
+        for bdata in saved_bats:
+            name = bdata.get("body")
+            queue = by_body.get(name, [])
+            if not queue:
+                continue
+            b = queue.pop(0)
+            b.mount_angle = float(bdata.get("mount_angle", b.mount_angle))
+            b.state = str(bdata.get("state", "idle"))
+            b.state_timer = float(bdata.get("state_timer", 0.0))
+            b.fire_cooldown = float(bdata.get("fire_cooldown", 0.0))
+            b.alive = bool(bdata.get("alive", True))
+            b.aim_point = None
+            b.solve_age = BATTERY_SOLVE_INTERVAL
 
     # In-flight bullets are cosmetic + fire-and-forget; drop on load.
     bullets.clear()
@@ -3003,6 +3604,7 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
     stats = data.get("stats", {})
     kills = int(stats.get("kills", 0))
     enemies_enabled = bool(stats.get("enemies_enabled", True))
+    batteries_enabled = bool(stats.get("batteries_enabled", True))
     enemy_spawn_timer = float(
         stats.get("enemy_spawn_timer", ENEMY_SPAWN_INTERVAL * 0.5)
     )
@@ -3022,6 +3624,7 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
         "plan_burn_offset": plan_burn_offset,
         "kills": kills,
         "enemies_enabled": enemies_enabled,
+        "batteries_enabled": batteries_enabled,
         "enemy_spawn_timer": enemy_spawn_timer,
         "predict_seconds": predict_seconds,
         "predict_target_steps": predict_target_steps,
@@ -3096,13 +3699,15 @@ def main() -> None:
     # `planet` slot in the build_world_for return is the "starter" body
     # (innermost landable) regardless of universe -- ship spawns there.
     current_universe: dict = {"type": "default"}
-    bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+    bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
         build_world_for(current_universe)
     )
+    missiles: list[Missile] = []
     ship = Ship(planet)
     stars = Starfield()
     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
     enemies_enabled = True
+    batteries_enabled = True
     kills = 0
     recorder = Recorder()
 
@@ -3203,6 +3808,84 @@ def main() -> None:
         "peri_alt": None, "apo_alt": None, "ca_alt": None,
     }
 
+    # Save / load helpers. Capture every world+state local via nonlocal so
+    # the F-key handlers can be reduced to a single call regardless of slot.
+    # Slot 0 == legacy single-slot quicksave (F2/F3 plain). Slots 1-9 are
+    # addressed by Ctrl+F1..F9 (save) / Shift+F1..F9 (load). Sharing the
+    # body avoids drift between the default slot and numbered slots.
+    def _do_quicksave(slot: int) -> None:
+        nonlocal hud_message
+        path = _save_slot_path(slot)
+        try:
+            save_session(
+                path, current_universe,
+                sim_time, ship, camera, deposits,
+                pads, turrets, enemies, batteries,
+                kills, enemies_enabled, batteries_enabled,
+                enemy_spawn_timer, paused, plan_burn_duration,
+                plan_burn_offset, maneuver_queue,
+                predict_seconds, predict_target_steps,
+                time_scale, hud_visible,
+            )
+            label = "QUICKSAVED" if slot == 0 else f"SAVED slot {slot}"
+            hud_message = (label, time.time() + HUD_MESSAGE_DURATION)
+        except OSError as ex:
+            hud_message = (f"save failed: {ex}",
+                           time.time() + HUD_MESSAGE_DURATION)
+
+    def _do_quickload(slot: int) -> None:
+        nonlocal bodies, planet, sun, deposits, pads, turrets, bullets
+        nonlocal enemies, batteries, missiles, current_universe
+        nonlocal sim_time, paused, plan_burn_duration, plan_burn_offset
+        nonlocal kills, enemies_enabled, batteries_enabled
+        nonlocal enemy_spawn_timer, predict_seconds, predict_target_steps
+        nonlocal time_scale, hud_visible, physics_accumulator
+        nonlocal hud_message
+        path = _save_slot_path(slot)
+        loaded = load_session_file(path)
+        if loaded is None:
+            label = "no quicksave" if slot == 0 else f"no save in slot {slot}"
+            hud_message = (label, time.time() + HUD_MESSAGE_DURATION)
+            return
+        # Phase 1 -- rebuild the universe from the saved spec BEFORE
+        # overlaying state. apply_session looks bodies up by name.
+        loaded_universe = loaded.get("universe", {"type": "default"})
+        bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
+            build_world_for(loaded_universe)
+        )
+        missiles = []
+        current_universe = loaded_universe
+        # Phase 2 -- overlay sim state onto the freshly built world.
+        result = apply_session(
+            loaded, ship, camera, bodies, deposits,
+            pads, turrets, enemies, bullets, batteries,
+            maneuver_queue,
+        )
+        sim_time = result["sim_time"]
+        paused = result["paused"]
+        plan_burn_duration = result["plan_burn_duration"]
+        plan_burn_offset = result["plan_burn_offset"]
+        kills = result["kills"]
+        enemies_enabled = result["enemies_enabled"]
+        batteries_enabled = result["batteries_enabled"]
+        enemy_spawn_timer = result["enemy_spawn_timer"]
+        predict_seconds = result["predict_seconds"]
+        predict_target_steps = result["predict_target_steps"]
+        time_scale = result["time_scale"]
+        hud_visible = result["hud_visible"]
+        physics_accumulator = 0.0
+        predict_cache["age"] = PREDICT_CACHE_INTERVAL
+        # Toast priority: warnings > version mismatch > plain success.
+        warns = result.get("warnings", [])
+        if warns:
+            label = f"loaded with warning: {warns[0]}"
+        elif result["partial"]:
+            label = (f"save partially restored "
+                     f"(v{result['saved_version']} -> v{SAVE_VERSION})")
+        else:
+            label = "QUICKLOADED" if slot == 0 else f"LOADED slot {slot}"
+        hud_message = (label, time.time() + HUD_MESSAGE_DURATION)
+
     running = True
     while running:
         frame_dt = clock.tick(FPS) / 1000.0
@@ -3232,9 +3915,10 @@ def main() -> None:
                                 current_universe = {
                                     "type": "random", "seed": seed,
                                 }
-                                bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+                                bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
                                     build_world_for(current_universe)
                                 )
+                                missiles = []
                                 ship.reset(planet)
                                 enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                                 kills = 0
@@ -3289,9 +3973,10 @@ def main() -> None:
                             f"random universe: seed {seed}",
                             time.time() + HUD_MESSAGE_DURATION,
                         )
-                    bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
+                    bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
                         build_world_for(current_universe)
                     )
+                    missiles = []
                     ship.reset(planet)
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                     kills = 0
@@ -3521,101 +4206,26 @@ def main() -> None:
                     plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
                     plan_burn_offset = 0.0
                     paused = False
+                elif (pygame.K_F1 <= event.key <= pygame.K_F9
+                        and (event.mod & pygame.KMOD_CTRL)):
+                    # Ctrl+F1..F9 -> save to numbered slot 1..9. Ctrl is
+                    # the active/destructive modifier (matches Ctrl-S in
+                    # most apps); Shift is the alternate (load).
+                    slot = event.key - pygame.K_F1 + 1
+                    _do_quicksave(slot)
+                elif (pygame.K_F1 <= event.key <= pygame.K_F9
+                        and (event.mod & pygame.KMOD_SHIFT)):
+                    # Shift+F1..F9 -> load from numbered slot 1..9.
+                    slot = event.key - pygame.K_F1 + 1
+                    _do_quickload(slot)
                 elif event.key == pygame.K_F1:
                     hud_visible = not hud_visible
                 elif event.key == pygame.K_F2:
-                    # Quickload: replace live state from disk. The save was
-                    # written at the END of a frame (any frame F3 was pressed
-                    # in), so loading at start-of-frame here puts us in the
-                    # equivalent moment on a fresh frame -- no partial-tick
-                    # bisection. predict_cache is force-refreshed since the
-                    # whole sim just teleported.
-                    save_path = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        SAVES_DIR, QUICKSAVE_NAME + ".json",
-                    )
-                    loaded = load_session_file(save_path)
-                    if loaded is None:
-                        hud_message = ("no quicksave",
-                                       time.time() + HUD_MESSAGE_DURATION)
-                    else:
-                        # Phase 1 -- rebuild the universe from the saved
-                        # spec BEFORE overlaying state. apply_session looks
-                        # up bodies by name (Ship.landed_body, brake-assist
-                        # target, etc.), so the body set has to match what
-                        # was saved against. Reassigning the eight world
-                        # references in main()'s frame here cleanly swaps
-                        # in the right Body / Deposit / pad / turret list
-                        # objects; apply_session then mutates these in
-                        # place to overlay sim state.
-                        loaded_universe = loaded.get(
-                            "universe", {"type": "default"}
-                        )
-                        bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
-                            build_world_for(loaded_universe)
-                        )
-                        current_universe = loaded_universe
-                        # Phase 2 -- overlay sim state onto the freshly
-                        # built world.
-                        result = apply_session(
-                            loaded, ship, camera, bodies, deposits,
-                            pads, turrets, enemies, bullets, maneuver_queue,
-                        )
-                        sim_time = result["sim_time"]
-                        paused = result["paused"]
-                        plan_burn_duration = result["plan_burn_duration"]
-                        plan_burn_offset = result["plan_burn_offset"]
-                        kills = result["kills"]
-                        enemies_enabled = result["enemies_enabled"]
-                        enemy_spawn_timer = result["enemy_spawn_timer"]
-                        predict_seconds = result["predict_seconds"]
-                        predict_target_steps = result["predict_target_steps"]
-                        time_scale = result["time_scale"]
-                        hud_visible = result["hud_visible"]
-                        physics_accumulator = 0.0
-                        predict_cache["age"] = PREDICT_CACHE_INTERVAL
-                        # Toast priority: warnings (most actionable) >
-                        # version mismatch > plain success.
-                        warns = result.get("warnings", [])
-                        if warns:
-                            hud_message = (
-                                f"loaded with warning: {warns[0]}",
-                                time.time() + HUD_MESSAGE_DURATION,
-                            )
-                        elif result["partial"]:
-                            hud_message = (
-                                f"save partially restored "
-                                f"(v{result['saved_version']} -> v{SAVE_VERSION})",
-                                time.time() + HUD_MESSAGE_DURATION,
-                            )
-                        else:
-                            hud_message = (
-                                "QUICKLOADED",
-                                time.time() + HUD_MESSAGE_DURATION,
-                            )
+                    # Quickload (slot 0 / legacy single-slot save).
+                    _do_quickload(0)
                 elif event.key == pygame.K_F3:
-                    # Quicksave: snapshot live state to disk. Written
-                    # atomically (.tmp -> rename, with .bak rotation) so a
-                    # crash mid-write can't corrupt the active slot.
-                    save_path = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        SAVES_DIR, QUICKSAVE_NAME + ".json",
-                    )
-                    try:
-                        save_session(
-                            save_path, current_universe,
-                            sim_time, ship, camera, deposits,
-                            pads, turrets, enemies, kills, enemies_enabled,
-                            enemy_spawn_timer, paused, plan_burn_duration,
-                            plan_burn_offset, maneuver_queue,
-                            predict_seconds, predict_target_steps,
-                            time_scale, hud_visible,
-                        )
-                        hud_message = ("QUICKSAVED",
-                                       time.time() + HUD_MESSAGE_DURATION)
-                    except OSError as ex:
-                        hud_message = (f"save failed: {ex}",
-                                       time.time() + HUD_MESSAGE_DURATION)
+                    # Quicksave (slot 0 / legacy single-slot save).
+                    _do_quicksave(0)
                 elif event.key == pygame.K_F4:
                     pygame.display.iconify()
                 elif event.key == pygame.K_F5:
@@ -3631,11 +4241,32 @@ def main() -> None:
                 elif event.key == pygame.K_F8:
                     time_scale = min(TIME_SCALE_MAX, time_scale * 2.0)
                 elif event.key == pygame.K_F10:
-                    enemies_enabled = not enemies_enabled
-                    if not enemies_enabled:
-                        for e in enemies:
-                            e.alive = False
-                        enemies = []
+                    if event.mod & pygame.KMOD_SHIFT:
+                        # Shift+F10: toggle planetary AA. Disabling stops
+                        # update/spawn but leaves battery sprites in place
+                        # (consistent with how F10 leaves dead pads/turrets);
+                        # also drops any in-flight hostile bullets so a
+                        # shot already on its way doesn't kill you after a
+                        # mid-air "off" toggle.
+                        batteries_enabled = not batteries_enabled
+                        if not batteries_enabled:
+                            for bat in batteries:
+                                bat.state = "idle"
+                                bat.aim_point = None
+                            for b in bullets:
+                                if b.hostile:
+                                    b.alive = False
+                        hud_message = (
+                            f"AA batteries: "
+                            f"{'on' if batteries_enabled else 'off'}",
+                            time.time() + HUD_MESSAGE_DURATION,
+                        )
+                    else:
+                        enemies_enabled = not enemies_enabled
+                        if not enemies_enabled:
+                            for e in enemies:
+                                e.alive = False
+                            enemies = []
                 elif event.key == pygame.K_h:
                     ship.toggle_brake_assist()
                 elif event.key == pygame.K_j:
@@ -3787,11 +4418,76 @@ def main() -> None:
                 for t in turrets:
                     t.update(PHYSICS_DT, enemies, bullets)
 
+                if batteries_enabled:
+                    for bat in batteries:
+                        bat.update(PHYSICS_DT, ship, bodies, sim_time, bullets)
+
+                # Missile printers (player-built; live on pad.printer slots).
+                # Update before missiles so a freshly-launched missile gets
+                # its first integration step this same physics tick.
+                for p in pads:
+                    if p.printer is not None and p.printer.alive:
+                        p.printer.update(PHYSICS_DT, ship, bodies,
+                                         batteries, enemies, missiles,
+                                         sim_time)
+
+                for m in missiles:
+                    m.update(PHYSICS_DT, sim_time, bodies)
+
+                # Missile detonation: AA batteries first (the priority
+                # target), then UFOs. UFO kills earn the same ore reward
+                # as a turret-kill so the missile can pay back its cost
+                # over time when used against chasers.
+                for m in missiles:
+                    if not m.alive:
+                        continue
+                    hit = False
+                    for bat in batteries:
+                        if not bat.alive:
+                            continue
+                        if (m.pos - bat.pos).length() <= MISSILE_BLAST_RADIUS + BATTERY_BODY:
+                            bat.alive = False
+                            m.alive = False
+                            hit = True
+                            break
+                    if hit:
+                        continue
+                    for e in enemies:
+                        if not e.alive:
+                            continue
+                        if (m.pos - e.pos).length() <= MISSILE_BLAST_RADIUS + ENEMY_RADIUS:
+                            e.alive = False
+                            m.alive = False
+                            ship.ore += ENEMY_KILL_REWARD
+                            kills += 1
+                            break
+
                 for b in bullets:
                     if not b.alive:
                         continue
                     b.update(PHYSICS_DT)
                     if not b.alive:
+                        continue
+                    # Body collision: bullets are solid, planets are solid.
+                    # Applies to both hostile (battery) and friendly (turret)
+                    # bullets -- batteries can fire optimistically through
+                    # their own planet, but the bullet quietly dies on
+                    # impact. Lazy O(n_bullets * n_bodies) check; n_bodies
+                    # is tiny (<10) so this is cheap.
+                    body_hit = False
+                    for body in bodies:
+                        if (b.pos - body.pos).length() <= body.radius + BULLET_RADIUS:
+                            b.alive = False
+                            body_hit = True
+                            break
+                    if body_hit:
+                        continue
+                    if b.hostile:
+                        # AA bullets only damage the ship. No ore reward,
+                        # no kill counter -- this is the player taking a hit.
+                        if ship.alive and (b.pos - ship.pos).length() <= SHIP_LEN * 0.6 + BULLET_RADIUS:
+                            ship.alive = False
+                            b.alive = False
                         continue
                     for e in enemies:
                         if not e.alive:
@@ -3806,6 +4502,13 @@ def main() -> None:
                 enemies = [e for e in enemies if e.alive]
                 bullets = [b for b in bullets if b.alive]
                 turrets = [t for t in turrets if t.alive]
+                batteries = [b for b in batteries if b.alive]
+                missiles = [m for m in missiles if m.alive]
+                # Detach dead printers from their pads so the green
+                # occupied-rim drops and the slot can be rebuilt.
+                for p in pads:
+                    if p.printer is not None and not p.printer.alive:
+                        p.printer = None
 
                 physics_accumulator -= PHYSICS_DT
         else:
@@ -4120,8 +4823,15 @@ def main() -> None:
             draw_buildpad(screen, camera, p)
         for t in turrets:
             draw_turret(screen, camera, t)
+        for p in pads:
+            if p.printer is not None:
+                draw_missile_printer(screen, camera, p.printer)
+        for bat in batteries:
+            draw_battery(screen, camera, bat)
         for b in bullets:
             draw_bullet(screen, camera, b)
+        for m in missiles:
+            draw_missile(screen, camera, m)
         for e in enemies:
             draw_enemy(screen, camera, e)
 
@@ -4150,15 +4860,27 @@ def main() -> None:
                      universe_spec=current_universe)
 
         if in_build_mode:
-            btn_rect, can_afford = draw_build_menu(screen, font, ship)
-            if mouse_clicked and can_afford:
-                bx, by, bw, bh = btn_rect
+            options = draw_build_menu(screen, font, ship)
+            if mouse_clicked:
                 mx, my = mouse_pos
-                if bx <= mx <= bx + bw and by <= my <= by + bh:
-                    ship.ore -= TURRET_COST
-                    new_t = Turret(candidate_pad.body, candidate_pad.angle)
-                    candidate_pad.turret = new_t
-                    turrets.append(new_t)
+                for opt in options:
+                    bx, by, bw, bh = opt["rect"]
+                    if not (bx <= mx <= bx + bw and by <= my <= by + bh):
+                        continue
+                    if not opt["can_afford"]:
+                        break
+                    if opt["kind"] == "turret":
+                        ship.ore -= TURRET_COST
+                        new_t = Turret(candidate_pad.body,
+                                       candidate_pad.angle)
+                        candidate_pad.turret = new_t
+                        turrets.append(new_t)
+                    elif opt["kind"] == "printer":
+                        ship.ore -= MISSILE_PRINTER_COST
+                        new_p = MissilePrinter(candidate_pad.body,
+                                               candidate_pad.angle)
+                        candidate_pad.printer = new_p
+                    break
 
         # Custom-seed entry overlay (Ctrl+Shift+R). Drawn above the HUD
         # and any toast so the modal is unambiguous; below REC so a

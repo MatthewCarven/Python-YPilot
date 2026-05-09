@@ -130,7 +130,7 @@ at any speed.
 | Input | Effect |
 |---|---|
 | **B (hold)** | Open the build menu while landed near an unoccupied build pad. |
-| **Mouse click** | Confirm the highlighted build option (currently: dumb turret, 50 ore). |
+| **Mouse click** | Confirm a build option from the menu. Two options today: **Dumb Turret** (50 ore) — anti-UFO, short range; **Missile Printer** (150 ore) — anti-AA + anti-UFO, 5000-unit range, 30 ore per launch. Each missile gets a bespoke orange flight plan computed at launch and flies it under gravity. Targets AA batteries first, then UFOs. |
 | **Release B** | Close the menu. |
 
 ## Plan-mode (Space)
@@ -239,8 +239,13 @@ want it.
 | Input | Effect |
 |---|---|
 | **F1** | Toggle HUD text overlay. World content (ship, trajectory, build menu, REC tally) stays visible — F1 only hides the text panels. |
+| **F2** | Quickload from the default slot (`saves/quicksave.json`). Toasts "QUICKLOADED" or "no quicksave". |
+| **F3** | Quicksave to the default slot. Atomic write (`.tmp` → rename, with `.bak` rotation), so a crash mid-write can't corrupt the active slot. Toasts "QUICKSAVED". |
+| **Ctrl + F1..F9** | Save to numbered slot 1-9 (`saves/quicksave_N.json`). Bookmarks for distinct expedition states you want to revisit. HUD toasts "SAVED slot N". |
+| **Shift + F1..F9** | Load from numbered slot 1-9. HUD toasts "LOADED slot N", or "no save in slot N" if the slot file doesn't exist yet. |
 | **F4** | Minimise the window (boss key). The OS handles the un-minimise. |
 | **F10** | Toggle enemy spawns. Also clears any in scene. |
+| **Shift + F10** | Toggle planetary AA batteries. About 50% of landable bodies are rolled with a body-mounted battery at world build (deterministic from the world seed). Each battery solves a real intercept against your ship's gravity-affected predicted trajectory, paints a 1 s targeting laser to the predicted hit point, then fires a straight-line bullet. The solver refuses to converge while you're burning (W/S) — that's the dodge escape hatch. Same damage as a UFO collision. |
 | **F11** | Toggle fullscreen. |
 | **F12** | Save a screenshot (PNG) into `./captures/` (created if missing). |
 | **R** | Reset world. |
@@ -252,8 +257,9 @@ want it.
 Mouse aim      A/D rotate          W/S thrust (Shift=5x, Ctrl=1%, Ctrl+Shift=0.1%)
 Q/E strafe     H brake-assist      J path-hold     B (hold) build
 +/- zoom       0 reset zoom        / shorter pred  * longer pred
-F1 HUD toggle  F4 minimise         F5/F6 steps     F7/F8 time scale
-F9 record      F10 enemies         F11 full        F12 shot
+F1 HUD toggle  F2/F3 quickload/save  F4 minimise   F5/F6 steps  F7/F8 time scale
+F9 record      F10 enemies           F11 full      F12 shot
+Ctrl+F1..F9 save slot N    Shift+F1..F9 load slot N
 R reset        Esc quit
 
 Plan mode (Space):
