@@ -45,6 +45,12 @@ Controls:
     + / =              zoom in
     - / _              zoom out
     0                  reset zoom to 1.0
+    LMB drag           pan the viewport off-ship for surveys of large
+                       systems where max-zoom-out still doesn't fit.
+                       Release and the camera eases back to ship over
+                       CAM_PAN_RECENTER_SECONDS (default 7s, easeOutCubic).
+                       Disabled while build mode (B) or the seed prompt
+                       is intercepting clicks.
     /                  shorter trajectory prediction window (down to 5s)
     *                  longer trajectory prediction window (up to 5min)
     F1                 toggle HUD text overlay (world content stays visible)
@@ -98,6 +104,11 @@ Controls:
                        the editable preview slot, restoring its duration
                        AND its fire-time offset. Useful for retuning a
                        burn without re-planning from scratch.
+    Shift + C          clear every queued burn -- the in-progress plan-
+                       mode chain AND any committed-but-not-yet-fired
+                       burns on the ship -- and drop the orange path.
+                       Works paused or unpaused. Shift-gated so a stray
+                       C can't wipe a long plan.
     F9                 toggle video recording. Pipes raw frames to ffmpeg
                        (must be on PATH) and writes a timestamped .mp4
                        into ./captures/ (created if missing). 30fps
@@ -109,7 +120,9 @@ Controls:
     F11                toggle fullscreen
     F12                save screenshot (PNG) into ./captures/ (created
                        if missing)
-    R                  reset world (default solar system)
+    R                  reset the active world (default on first launch;
+                       sticks with the last Shift+R / Ctrl+Shift+R seed
+                       once you've rolled one — not persisted to disk)
     Shift + R          reset to a freshly-rolled random universe
                        (1-6 planets, optional moons, e <= 0.3). Seed
                        printed on HUD so memorable rolls can be recalled.
@@ -258,6 +271,10 @@ LATERAL_THRUST_SCALE = 0.1       # Q / E strafe thrusters; same magnitude
                                  # as default retro for symmetric feel
 
 MOUSE_AIM_DEADZONE_SQ = 9.0
+
+# Click-drag viewport pan: LMB-drag pulls the camera off the ship for
+# wider surveys of big systems; release eases it back. Tunable by feel.
+CAM_PAN_RECENTER_SECONDS = 7.0
 
 # --- Fuel -------------------------------------------------------------------
 MAX_FUEL = 100.0
@@ -3091,6 +3108,17 @@ def main() -> None:
 
     camera = Camera()
     camera.zoom = 1.0
+    # Click-drag pan state. Pure runtime UI -- not persisted across
+    # save/load and not reset on R, since it just eases back to zero
+    # on its own. World-space offset added on top of the ship-following
+    # camera each frame; release snapshots it so easeOutCubic can drive
+    # it back to (0, 0) over CAM_PAN_RECENTER_SECONDS regardless of
+    # how far the user dragged.
+    cam_pan_offset = Vector2(0.0, 0.0)
+    cam_pan_dragging = False
+    cam_pan_last_screen: tuple[int, int] | None = None
+    cam_pan_release_offset: Vector2 | None = None
+    cam_pan_release_elapsed = 0.0
 
     fullscreen = False
     hud_visible = True
@@ -3239,7 +3267,11 @@ def main() -> None:
                 if event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_r:
-                    # R           = default universe
+                    # R           = rebuild the currently-active universe
+                    #               (default on launch, or whichever random
+                    #               seed was last summoned this session — the
+                    #               choice isn't persisted to disk, so a
+                    #               fresh launch always starts on default)
                     # Shift+R     = freshly-rolled random universe
                     # Ctrl+Shift+R = open the custom-seed prompt (modal,
                     #                freezes sim until commit/cancel) so a
@@ -3257,8 +3289,6 @@ def main() -> None:
                             f"random universe: seed {seed}",
                             time.time() + HUD_MESSAGE_DURATION,
                         )
-                    else:
-                        current_universe = {"type": "default"}
                     bodies, planet, sun, deposits, pads, turrets, bullets, enemies = (
                         build_world_for(current_universe)
                     )
@@ -3312,6 +3342,33 @@ def main() -> None:
                         _, popped_dur, popped_off = maneuver_queue.pop()
                         plan_burn_duration = popped_dur
                         plan_burn_offset = popped_off
+                elif (event.key == pygame.K_c
+                        and event.mod & pygame.KMOD_SHIFT):
+                    # Shift+C: nuke every queued burn -- the in-progress
+                    # plan-mode chain (maneuver_queue), any committed-but-
+                    # not-yet-fired burns on the ship (pending_maneuvers),
+                    # and the orange path the predictor was holding to.
+                    # Shift-gated so a stray C keystroke can't wipe a long
+                    # plan. Works paused or unpaused: a "queued burn" looks
+                    # the same to the player whether it's still in the
+                    # editor or already locked in.
+                    cleared = (len(maneuver_queue)
+                               + len(ship.pending_maneuvers))
+                    maneuver_queue.clear()
+                    ship.pending_maneuvers.clear()
+                    ship.set_planned_trajectory([])
+                    ship.path_hold = False
+                    plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                    plan_burn_offset = (
+                        _reset_preview_offset() if paused else 0.0
+                    )
+                    predict_cache["age"] = PREDICT_CACHE_INTERVAL
+                    if cleared:
+                        hud_message = (
+                            f"cleared {cleared} queued burn"
+                            f"{'s' if cleared != 1 else ''}",
+                            time.time() + HUD_MESSAGE_DURATION,
+                        )
                 elif event.key in (pygame.K_LEFTBRACKET,
                                    pygame.K_RIGHTBRACKET) and paused:
                     # Step ladder: Shift = leap (1.0 s), plain = coarse,
@@ -3634,6 +3691,48 @@ def main() -> None:
         candidate_pad = nearest_unoccupied_pad(ship, pads)
         in_build_mode = build_held and candidate_pad is not None
 
+        # Click-drag viewport pan (with ease-back). LMB held over the
+        # playfield drags the camera in world space; release lets it
+        # ease back toward the ship over CAM_PAN_RECENTER_SECONDS.
+        # Skipped while the build menu (B) or the seed-prompt overlay
+        # is intercepting clicks, so neither workflow gets hijacked.
+        cam_pan_allowed = not in_build_mode and not seed_prompt_active
+        lmb_held = pygame.mouse.get_pressed()[0] and cam_pan_allowed
+        if lmb_held:
+            if not cam_pan_dragging:
+                cam_pan_dragging = True
+                cam_pan_last_screen = mouse_pos
+                cam_pan_release_offset = None
+            else:
+                dx = mouse_pos[0] - cam_pan_last_screen[0]
+                dy = mouse_pos[1] - cam_pan_last_screen[1]
+                if camera.zoom > 0.0:
+                    # Drag-right should pull the world right under the
+                    # cursor, i.e. the camera moves LEFT in world space.
+                    cam_pan_offset.x -= dx / camera.zoom
+                    cam_pan_offset.y -= dy / camera.zoom
+                cam_pan_last_screen = mouse_pos
+        else:
+            if cam_pan_dragging:
+                cam_pan_dragging = False
+                if cam_pan_offset.length_squared() > 0.0:
+                    cam_pan_release_offset = Vector2(cam_pan_offset)
+                    cam_pan_release_elapsed = 0.0
+                else:
+                    cam_pan_release_offset = None
+            if cam_pan_release_offset is not None:
+                cam_pan_release_elapsed += frame_dt
+                t = cam_pan_release_elapsed / CAM_PAN_RECENTER_SECONDS
+                if t >= 1.0:
+                    cam_pan_offset = Vector2(0.0, 0.0)
+                    cam_pan_release_offset = None
+                else:
+                    # easeOutCubic: most of the travel happens early so
+                    # the viewport lunges back, then settles gently into
+                    # ship-centred frame -- avoids a jarring final snap.
+                    ease = 1.0 - (1.0 - t) ** 3
+                    cam_pan_offset = cam_pan_release_offset * (1.0 - ease)
+
         # Plan mode (Space): freeze the entire simulation -- bodies, ship,
         # enemies, bullets, turrets, fuel/refuel. Time t doesn't advance, so
         # body rails stay frozen too. The render block still runs and draws
@@ -3758,6 +3857,11 @@ def main() -> None:
             camera.pos = Vector2(cam_pts[-1] if cam_pts else ship.pos)
         else:
             camera.pos = Vector2(ship.pos)
+        # Apply click-drag pan offset on top, in both paused (lookahead)
+        # and live modes. Adds to whichever anchor the camera was just
+        # set to, so easing back returns to that anchor naturally.
+        if cam_pan_offset.length_squared() > 0.0:
+            camera.pos = camera.pos + cam_pan_offset
 
         # --- Render ------------------------------------------------------
         screen.fill(BG)

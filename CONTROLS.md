@@ -100,6 +100,7 @@ brake-assist, green for landed).
 | **+ / =** | Zoom in. |
 | **- / _** | Zoom out. |
 | **0** | Reset zoom to 1.0×. |
+| **LMB drag** | Pan the viewport off-ship for surveys of large systems where max zoom-out still doesn't fit. Release and the camera eases back to the ship over `CAM_PAN_RECENTER_SECONDS` (default 7 s, easeOutCubic). Disabled while build mode (**B**) or the seed prompt is intercepting clicks. |
 | `/` | Shorter trajectory prediction window (down to 5 s). |
 | `*` | Longer prediction window (up to ~16.7 min). |
 | **F5** | Halve the predictor's per-frame step budget. Coarser, cheaper, less faithful. |
@@ -190,6 +191,7 @@ Plan mode supports queueing multiple burns in sequence:
 |---|---|
 | **N** | Push the current preview onto the chain; start planning the next burn. The next preview defaults to the same fire-time as the burn you just queued (camera stays glued to that point). Each queued burn gets a numbered chevron on the orange trajectory. |
 | **Backspace** | Pop the last queued burn back into the editable preview slot, restoring its duration AND its fire-time. Useful for retuning without re-planning. |
+| **Shift + C** | Nuke every queued burn — the in-progress plan-mode chain *and* any committed-but-not-yet-fired burns on the ship — and drop the orange path. Works paused or unpaused. Shift-gated so a stray **C** can't wipe a long plan. HUD reports how many burns were cleared. |
 | **Enter** | Commit the full chain. Burn 0 fires immediately; burn k fires at `sim_time + offset[k]`. Lifts off automatically if landed. With an empty queue this behaves identically to the old single-burn commit. |
 
 After commit, the predicted trajectory is snapshotted (extended past the
