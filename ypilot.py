@@ -50,9 +50,14 @@ Controls:
                        the nearest hostile within 5000 units. Each missile
                        gets its own bespoke flight plan (orange trail) and
                        flies it under gravity.
-    + / =              zoom in
-    - / _              zoom out
+    + / =              zoom in (sets the persistent "resting" zoom)
+    - / _              zoom out (sets the persistent "resting" zoom)
     0                  reset zoom to 1.0
+    Mouse wheel        peek zoom -- temporary multiplier off the resting
+                       zoom, eases back to the rest over
+                       CAM_ZOOM_RECENTER_SECONDS (default 7s,
+                       easeOutCubic). Spam-scroll holds the peek;
+                       pausing kicks off the return.
     LMB drag           pan the viewport off-ship for surveys of large
                        systems where max-zoom-out still doesn't fit.
                        Release and the camera eases back to ship over
@@ -208,7 +213,7 @@ TIME_SCALE_MIN = 1.0 / 16.0
 TIME_SCALE_MAX = 16.0
 
 # --- Zoom -------------------------------------------------------------------
-ZOOM_MIN = 0.125
+ZOOM_MIN = 0.015625
 ZOOM_MAX = 8.0
 ZOOM_STEP = 1.15
 
@@ -301,6 +306,12 @@ MOUSE_AIM_DEADZONE_SQ = 9.0
 # Click-drag viewport pan: LMB-drag pulls the camera off the ship for
 # wider surveys of big systems; release eases it back. Tunable by feel.
 CAM_PAN_RECENTER_SECONDS = 7.0
+
+# Mouse-wheel "peek" zoom: each wheel tick multiplies a peek factor off
+# the resting zoom (set by +/- and 0); the factor eases back to 1.0 over
+# CAM_ZOOM_RECENTER_SECONDS so the camera always wants to come home to
+# the zoom level the player explicitly chose. Mirrors the pan ease-back.
+CAM_ZOOM_RECENTER_SECONDS = 7.0
 
 # --- Fuel -------------------------------------------------------------------
 MAX_FUEL = 100.0
@@ -3729,6 +3740,16 @@ def main() -> None:
     cam_pan_release_offset: Vector2 | None = None
     cam_pan_release_elapsed = 0.0
 
+    # Mouse-wheel peek zoom. cam_zoom_rest is the persistent value the
+    # player picks with +/- (and 0); cam_zoom_peek is a transient
+    # multiplier driven by the wheel that eases back to 1.0. Effective
+    # camera.zoom = clamp(rest * peek, ZOOM_MIN, ZOOM_MAX) is rebuilt
+    # every frame, so any consumer that reads camera.zoom keeps working.
+    cam_zoom_rest = 1.0
+    cam_zoom_peek = 1.0
+    cam_zoom_release_factor: float | None = None
+    cam_zoom_release_elapsed = 0.0
+
     fullscreen = False
     hud_visible = True
     # (text, expires-at wall-clock time). draw_hud_message renders this if
@@ -3820,6 +3841,10 @@ def main() -> None:
     def _do_quicksave(slot: int) -> None:
         nonlocal hud_message
         path = _save_slot_path(slot)
+        # Persist the resting zoom (set by +/- and 0), not whatever the
+        # player is peeking at via the wheel right now. Briefly stomp
+        # camera.zoom; the per-frame ease block rebuilds it next frame.
+        camera.zoom = cam_zoom_rest
         try:
             save_session(
                 path, current_universe,
@@ -3844,6 +3869,7 @@ def main() -> None:
         nonlocal kills, enemies_enabled, batteries_enabled
         nonlocal enemy_spawn_timer, predict_seconds, predict_target_steps
         nonlocal time_scale, hud_visible, physics_accumulator
+        nonlocal cam_zoom_rest, cam_zoom_peek, cam_zoom_release_factor
         nonlocal hud_message
         path = _save_slot_path(slot)
         loaded = load_session_file(path)
@@ -3879,6 +3905,12 @@ def main() -> None:
         hud_visible = result["hud_visible"]
         physics_accumulator = 0.0
         predict_cache["age"] = PREDICT_CACHE_INTERVAL
+        # apply_session set camera.zoom from the saved file -- promote
+        # that to the new resting zoom and clear any in-progress peek
+        # so the loaded view doesn't drift on first frame.
+        cam_zoom_rest = camera.zoom
+        cam_zoom_peek = 1.0
+        cam_zoom_release_factor = None
         # Toast priority: warnings > version mismatch > plain success.
         warns = result.get("warnings", [])
         if warns:
@@ -4276,11 +4308,17 @@ def main() -> None:
                 elif event.key == pygame.K_j:
                     ship.toggle_path_hold()
                 elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
-                    camera.zoom = min(ZOOM_MAX, camera.zoom * ZOOM_STEP)
+                    cam_zoom_rest = min(ZOOM_MAX, cam_zoom_rest * ZOOM_STEP)
+                    cam_zoom_peek = 1.0
+                    cam_zoom_release_factor = None
                 elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                    camera.zoom = max(ZOOM_MIN, camera.zoom / ZOOM_STEP)
+                    cam_zoom_rest = max(ZOOM_MIN, cam_zoom_rest / ZOOM_STEP)
+                    cam_zoom_peek = 1.0
+                    cam_zoom_release_factor = None
                 elif event.key == pygame.K_0:
-                    camera.zoom = 1.0
+                    cam_zoom_rest = 1.0
+                    cam_zoom_peek = 1.0
+                    cam_zoom_release_factor = None
                 elif event.key in (pygame.K_SLASH, pygame.K_KP_DIVIDE):
                     predict_seconds = max(
                         PREDICT_MIN_SECONDS, predict_seconds / PREDICT_STEP
@@ -4318,6 +4356,18 @@ def main() -> None:
                         recorder.start(screen.get_size(), out_dir)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 mouse_clicked = True
+            elif event.type == pygame.MOUSEWHEEL:
+                # Wheel "peek" zoom. Each tick offsets cam_zoom_peek
+                # off the resting zoom; the per-frame ease block below
+                # pulls it back to 1.0 over CAM_ZOOM_RECENTER_SECONDS.
+                # New ticks reset the ease timer so spam-scrolling holds
+                # the zoom; pausing kicks off the return.
+                if event.y > 0:
+                    cam_zoom_peek *= ZOOM_STEP
+                elif event.y < 0:
+                    cam_zoom_peek /= ZOOM_STEP
+                cam_zoom_release_factor = cam_zoom_peek
+                cam_zoom_release_elapsed = 0.0
 
         keys = pygame.key.get_pressed()
         mods = pygame.key.get_mods()
@@ -4569,6 +4619,23 @@ def main() -> None:
         # set to, so easing back returns to that anchor naturally.
         if cam_pan_offset.length_squared() > 0.0:
             camera.pos = camera.pos + cam_pan_offset
+
+        # Wheel-peek zoom ease-back: each frame, pull cam_zoom_peek toward
+        # 1.0 from whatever value it had at the last wheel tick. Mirrors
+        # the pan ease-back in shape (easeOutCubic) and duration.
+        if cam_zoom_release_factor is not None:
+            cam_zoom_release_elapsed += frame_dt
+            t = cam_zoom_release_elapsed / CAM_ZOOM_RECENTER_SECONDS
+            if t >= 1.0:
+                cam_zoom_peek = 1.0
+                cam_zoom_release_factor = None
+            else:
+                ease = 1.0 - (1.0 - t) ** 3
+                cam_zoom_peek = (cam_zoom_release_factor
+                                 + (1.0 - cam_zoom_release_factor) * ease)
+        # Effective zoom for everything that reads camera.zoom this frame.
+        camera.zoom = max(ZOOM_MIN,
+                          min(ZOOM_MAX, cam_zoom_rest * cam_zoom_peek))
 
         # --- Render ------------------------------------------------------
         screen.fill(BG)
