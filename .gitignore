@@ -29,3 +29,6 @@ desktop.ini
 
 # Screenshot / video output (F12 / F9)
 captures/
+
+# Quicksave slots (F3 default slot, Ctrl+F1..F9 numbered slots)
+saves/

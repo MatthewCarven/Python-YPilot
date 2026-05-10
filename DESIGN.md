@@ -7,12 +7,13 @@ see [TRAJECTORY.md](TRAJECTORY.md).
 
 ## Architecture in one breath
 
-Single-file Python (`ypilot.py`, ~2970 lines) on top of pygame-ce. The
+Single-file Python (`ypilot.py`, ~4500 lines) on top of pygame-ce. The
 sim is a fixed-timestep leapfrog integrator over a hierarchical Keplerian
-solar system; the visible game (mining, building, combat) hangs off
-that. There is no ECS, no scene graph, no asset pipeline — every game
-object is a small class with `update()` / `draw()` methods, and `main()`
-drives the loop.
+solar system; the visible game (mining, building, combat, AA defence,
+missile printers, save/load, random universes) hangs off that. There is
+no ECS, no scene graph, no asset pipeline — every game object is a
+small class with `update()` / `draw()` methods, and `main()` drives the
+loop.
 
 The codebase trades modular fanciness for diff-readability: when you
 change something, you can usually see all of its dependents on the same
@@ -22,18 +23,20 @@ screen.
 
 ### Bodies
 
-A `Body` represents the Sun, the Planet, the Moon, Ember, or Frostbite.
-Bodies have mass (`mu` — gravitational parameter), an optional parent,
-an orbit radius, an initial phase angle, and a `landable` flag.
+A `Body` represents any celestial object — Sun, planet, or moon. Bodies
+have mass (`mu` — gravitational parameter), an optional parent, an orbit
+radius (semi-major axis `a`), an initial phase angle, a `landable` flag,
+and optional `eccentricity` (≤ 0.3) + `arg_periapsis` for elliptical
+orbits.
 
-The system is **hierarchical**:
+The default world is hand-tuned and circular:
 
 ```
 Sun
-└── Planet     (orbit_radius=800,  landable)
-│   └── Moon   (orbit_radius=250 around Planet, landable)
-└── Ember      (orbit_radius=1800, landable)
-└── Frostbite  (orbit_radius=3000, landable)
+└── Planet     (orbit_radius=800,  landable, e=0)
+│   └── Moon   (orbit_radius=250 around Planet, landable, e=0)
+└── Ember      (orbit_radius=1800, landable, e=0)
+└── Frostbite  (orbit_radius=3000, landable, e=0)
 ```
 
 Each body has two methods:
@@ -45,11 +48,18 @@ Each body has two methods:
   position at any time, without touching state. Used by the trajectory
   predictor.
 
+For circular orbits both methods take a fast path that's bit-identical
+to the pre-eccentric code (so path-hold's predictor↔live agreement
+stays exact on the default world). For e > 0, `solve_kepler` runs a
+3–4-iteration Newton solve (5-iter cap defensively).
+
 `update_bodies(bodies, t)` walks the list in dependency order
 (`Sun → Planet → Moon → Ember → Frostbite`) so the chain stays consistent
 within a single physics step. The two outer planets parent directly to
 the Sun; the Moon's Planet-parented entry sits before them in the list
-so it can read Planet's freshly-updated state.
+so it can read Planet's freshly-updated state. `make_random_solar_system`
+returns bodies in the same parent-before-child order — Sun, then planets
+sorted by semi-major axis, then moons grouped after their parent.
 
 ### Why hierarchical orbits?
 
@@ -66,7 +76,7 @@ Two reasons:
    there's only ~39 px before Planet's gravity overpowers Moon's —
    so landings need real precision.
 
-### Why four landable bodies?
+### Why four landable bodies (in the default world)?
 
 With one planet, "navigate" means "fly forward". With two, you get a
 Hohmann transfer (Planet ↔ Ember, ~52 s burn). With four — Planet, Moon,
@@ -91,6 +101,49 @@ just by virtue of travel time and exposure to UFOs en route).
 The Moon **laps the player's default 370 px orbit** because shorter
 orbits are faster (`v = √(μ/r)`). Intercepts are real puzzles, not just
 "point and fly".
+
+## Random universes
+
+`Shift+R` rolls a fresh universe; `Ctrl+Shift+R` opens a digit-only
+modal prompt for a specific seed (the latter is how you re-summon a
+memorable roll across sessions). `make_random_solar_system(seed)` is
+deterministic — same seed, same world.
+
+### Layout
+
+- **1–6 planets** (`RANDOM_PLANETS_MIN/MAX`), shell-packed by geometric
+  spacing (`RANDOM_SPACING_RATIO_MIN/MAX = 1.7..2.4`) so adjacent shells
+  can't overlap even at max eccentricity. Innermost is at least
+  `RANDOM_FIRST_AXIS_MIN..MAX = 600..1200` from the sun.
+- **0–2 moons per planet**, capped at **4 total** so the predictor cost
+  stays bounded (each body adds Kepler-solve work to every predictor
+  step). Moons live within `RANDOM_MOON_ZONE_FRAC = 0.4 × SOI` of their
+  parent — Hill/2.5-ish — so they don't get yanked off at periapsis of
+  an elliptical planet orbit.
+- **Eccentricity ≤ 0.3** (`RANDOM_MAX_E`). A two-pass roll uses
+  provisional `e_next = 0` first, then refines knowing the actual
+  neighbours. For e ≤ 0.3 it converges after one pass; the second is
+  belt-and-braces.
+- **Color palette** indexed by orbit position (hot red innermost →
+  icy white-blue outermost). Names are `P1..P6` / `P{i}M{j}` so
+  save-file `body_ref` lookups stay stable per seed.
+
+### Allocation policy
+
+`build_world_for(spec)` picks the **innermost landable** planet as the
+"starter" (where the ship spawns and gets its bootstrap deposits + most
+of the pads) and the **outermost landable** as the "destination" (the
+ore world, no pads). Middle bodies pick up forward-base pads. This
+preserves the "mine here, defend there, travel matters" gameplay arc
+regardless of how many planets rolled.
+
+In a single-planet system, the lone planet collapses both roles —
+6 deposits + 5 pads. Defensive builds compete with mining for the
+same surface real estate, which is its own kind of puzzle.
+
+AA batteries are rolled per-world with a seed offset
+(`seed ^ 0xBA77E1F`) so the same world seed always produces the same
+battery layout — including for the default world (`seed=0`).
 
 ## Physics
 
@@ -343,6 +396,10 @@ predictable so the player isn't doing 3-body intercepts on top of
 everything else. Enemies course-correct toward the ship every
 ~60 s ± 50 % so they don't sail past harmlessly if the ship has moved.
 
+Missiles are the deliberate exception: they fly **under gravity** with
+their own bespoke flight plan computed at launch time (see
+"Missile printers" below).
+
 Turrets lead targets with a **single-pass intercept solution**:
 
 ```
@@ -355,7 +412,68 @@ turret" feel. There's no recursive lead-calc — one pass is good enough
 for the gameplay budget.
 
 Enemy-ship contact = instant kill (currently). Bullet-enemy contact
-gives `ENEMY_KILL_REWARD = 6 ore` per kill.
+gives `ENEMY_KILL_REWARD = 6 ore` per kill. AA-bullet-ship contact is
+also instant kill — same damage as a UFO collision. AA-bullet-body
+contact (the AA fired through its own planet) silently absorbs the
+bullet on impact, so optimistic firing solutions don't grief the player
+from the wrong side of a planet.
+
+### Planetary AA batteries
+
+Stationary defenders mounted to landable bodies. Per-world deterministic
+roll: `_roll_batteries(bodies, seed)` rolls each landable body with
+`BATTERY_SPAWN_PROBABILITY = 0.5` — about half of bodies get one. The
+seed is the universe seed XOR'd with `0xBA77E1F` so the same world
+always produces the same battery layout.
+
+Each battery has its own intercept solver:
+
+1. While idle, every `BATTERY_SOLVE_INTERVAL = 0.25 s`, run the
+   **gravity-affected ship trajectory predictor** forward and look for
+   a hit point along the predicted path that a straight-line bullet
+   could reach in the matching time. Up to `BATTERY_SOLVE_MAX_ITERS = 6`
+   passes with `BATTERY_PREDICT_STEPS = 120` integration steps.
+2. **Refuses to converge** while the ship is burning W or S. That's
+   the dodge escape hatch — thrust breaks the lock by making the
+   gravity-only predictor's path wrong.
+3. When the solver converges, paint a **targeting laser** at the
+   predicted hit point for `BATTERY_LASER_DURATION = 1 s`, then fire.
+4. Cooldown `BATTERY_FIRE_COOLDOWN = 4 s` between shots.
+
+Toggle the system on/off with **Shift+F10**. Disabling drops any
+in-flight hostile bullets so a shot already on its way doesn't kill you
+mid-air after the toggle.
+
+### Missile printers
+
+Player-built counter to AA batteries (and a longer-range anti-UFO
+option). Constructed on a build pad like a turret but pricier
+(`MISSILE_PRINTER_COST = 150`), longer-ranged
+(`MISSILE_PRINTER_RANGE = 5000`), and slower-firing
+(`MISSILE_PRINTER_COOLDOWN = 8 s`). Each shot also costs
+`MISSILE_ORE_COST = 30` ore at fire-time, so the structure remains a
+sustained drain on the economy rather than fire-and-forget.
+
+Target priority: **AA batteries > UFOs**. Once an AA battery is in
+range, every shot goes there until it's gone, then the printer falls
+back to UFO duty.
+
+Each missile flies under gravity with **constant thrust toward a
+static aim-point computed at launch**. `plan_missile_flight` runs an
+intercept solver over the missile's gravity-affected trajectory:
+
+1. Pick an initial aim point (target's predicted future position).
+2. Integrate the missile forward `MISSILE_PLAN_HORIZON = 12 s` toward
+   that aim point.
+3. Find the closest pass to the target's actual predicted trajectory.
+4. Re-pick the aim point as the target's position at the closest-pass
+   time, repeat (up to `MISSILE_PLAN_SOLVE_ITERS = 5`).
+
+The same gravity sampler and thrust law run in both planner and live
+update, so the live missile flight is **bit-equivalent to the planned
+line** — no PD path-hold needed, the orange trail draws the actual
+flight path. Detonation is `MISSILE_BLAST_RADIUS = 18 px` proximity
+on either an AA battery or a UFO.
 
 ## Camera
 
@@ -368,6 +486,60 @@ screen = (world - camera.pos) * zoom + screen_centre
 HUD renders at native screen pixels; world objects scale. Stars (the
 parallax background) are drawn in screen space, not scaled by zoom, so
 they always look like single pixels regardless of zoom level.
+
+### Click-drag pan with ease-back
+
+Holding LMB on the playfield drags the camera off the ship in world
+space (delta divided by zoom so the world tracks the cursor 1:1). On
+release, the offset eases back to zero over `CAM_PAN_RECENTER_SECONDS
+= 7 s` with an `easeOutCubic` curve — most of the travel happens early
+so the viewport lunges back, then settles gently. The ease-back is
+applied on top of whichever camera anchor is active (ship-following or
+plan-mode-trajectory-following), so it composes naturally with both.
+
+Disabled while the build menu (B held) or the seed-prompt overlay is
+intercepting clicks — those workflows want LMB for their own purposes.
+
+## Save / load
+
+State persists to disk via `save_session` / `apply_session`. F3
+quicksaves to `saves/quicksave.json` (the legacy single slot); Ctrl+F1..F9
+saves to `saves/quicksave_N.json`; Shift+F1..F9 loads from the same
+slots; F2 loads the legacy slot.
+
+### Atomic writes
+
+Saves go through `path.tmp` and a `.bak` rotation:
+
+```
+1. Write JSON to path.tmp
+2. If path exists, rename path → path.bak (rotate previous save)
+3. Rename path.tmp → path
+```
+
+A crash mid-write can corrupt the `.tmp`, but the active slot stays
+intact. Manual recovery from the `.bak` is one rename away.
+
+### Versioning
+
+`SAVE_VERSION = 2` is stored in every save. `apply_session` is
+**best-effort with warnings**: if the saved version doesn't match,
+loading still happens but a HUD toast tells the player that the save
+was partially restored. Fields the new version added default to
+sensible values; fields the new version removed are silently ignored.
+
+### Universe in the save
+
+Each save stores the active universe spec (`{"type": "default"}` or
+`{"type": "random", "seed": int}`). On load, `build_world_for(spec)`
+re-seeds the random generator before applying ship state, so a
+quickload of a random universe lands you back on the same world even
+though the seed was rolled in a previous session.
+
+Bodies are referenced by `name` (e.g., `"P3M1"`) in the save; on load
+they're looked up against the freshly-rebuilt world. Mismatched names
+(e.g., trying to load a save into a different world) trigger a partial
+restore with a warning toast.
 
 ## Coordinates and direction math
 
@@ -447,6 +619,24 @@ tweaked by feel:
 | `PLANET3_MU` (Frostbite) | 2 500 000 | Lighter than Planet (~80 % surface gravity) |
 | `PLANET3_ORBIT_RADIUS` | 3000 | Hohmann from Planet ~92 s; from Ember ~146 s |
 | `PLANET3_RADIUS` | 80 | Smaller than Planet — silhouette reads as "distant" |
+| `RANDOM_PLANETS_MIN/MAX` | 1 / 6 | Planet count clamp for `Shift+R` |
+| `RANDOM_MOONS_TOTAL_MAX` | 4 | Cap on total moons (predictor cost is per-body-per-step) |
+| `RANDOM_MAX_E` | 0.3 | Max eccentricity in random worlds (default world stays at 0) |
+| `RANDOM_SPACING_RATIO_MIN/MAX` | 1.7 / 2.4 | Geometric shell-spacing for orbit-no-cross guarantee |
+| `RANDOM_SHELL_BUFFER` | 100 | Min gap between adjacent shells' peri/apo |
+| `BATTERY_RANGE` | 2400 | AA targeting range (~6.3× turret range) |
+| `BATTERY_FIRE_COOLDOWN` | 4.0 | Seconds between AA shots |
+| `BATTERY_LASER_DURATION` | 1.0 | Targeting-laser telegraph window before firing |
+| `BATTERY_SPAWN_PROBABILITY` | 0.5 | Per-landable-body roll for AA presence |
+| `MISSILE_PRINTER_COST` | 150 | Build cost (vs `TURRET_COST = 50`) |
+| `MISSILE_PRINTER_RANGE` | 5000 | Hostile-detection range (vs `TURRET_RANGE = 380`) |
+| `MISSILE_PRINTER_COOLDOWN` | 8.0 | Seconds between launches |
+| `MISSILE_ORE_COST` | 30 | Ore consumed per missile launched |
+| `MISSILE_PLAN_HORIZON` | 12.0 | Seconds the at-launch flight planner integrates forward |
+| `MISSILE_BLAST_RADIUS` | 18 | Detonation proximity radius |
+| `CAM_PAN_RECENTER_SECONDS` | 7.0 | LMB-drag camera ease-back duration |
+| `SAVE_VERSION` | 2 | Save-file format version (best-effort load on mismatch) |
+| `HUD_MESSAGE_DURATION` | 2.5 | Toast lifetime (F2/F3, Shift+R, AA toggle, etc.) |
 | `PREDICT_MAX_SECONDS` | 1000 | Predictor look-ahead ceiling (~16.7 min) |
 | `PREDICT_TARGET_STEPS` | 6400 | Predictor step-cap default (F5/F6 mutate at runtime) |
 | `PREDICT_TARGET_STEPS_MIN` | 100 | F5 floor — coarse but legal |
@@ -516,7 +706,6 @@ Applies to any fork:
 
 - **Composable multi-part turrets** — base + barrel + ammo crate, faster
   aim, longer range. Reuses the eventual ship-builder grid code.
-- **Save/load to disk** — persist world state across sessions.
 - **Passive harvest structures** — long-term miners and fuel synthesis
   (H₂O + ore + sunlight). Adds water as a second resource.
 - **Build-while-hovering** — "unreliable catch arm" with rubber-seal
@@ -524,10 +713,22 @@ Applies to any fork:
 - **Recursive build pads** — let the player construct their own pads.
 - **Multiplayer sync** — v2.0, big project.
 - **Player / planet HP and combat consequences** — currently enemy
-  contact is instant death. Add hit points and repair-with-ore.
+  and AA-bullet contact are instant death. Add hit points and
+  repair-with-ore.
 - **Polish pass** — engine trails, particles, sounds, screen shake.
 - **Landing pads with compression absorption** — buildable that softens
   hard landings.
-- **Tier 4: more bodies** — proper N-body chaos. The predictor already
-  handles arbitrary body counts; adding more is just a matter of game
-  design.
+- **Persistent universe choice across launches** — currently the
+  rolled seed is held only in-session; a fresh launch always starts on
+  default. A small `last_universe.json` would fix this without touching
+  save-slot semantics.
+
+### Recently shipped (no longer deferred)
+
+- **Save/load to disk** — done. F2/F3 + Ctrl+F1..F9 / Shift+F1..F9, atomic
+  write with `.bak` rotation, `SAVE_VERSION = 2` with best-effort
+  cross-version loads. See "Save / load" section above.
+- **Tier 4: more bodies** — done via random universes. `Shift+R` rolls
+  1–6 planets and up to 4 moons; predictor scales linearly in body count
+  (each body is a Kepler-solve per integration step) so the cap is a
+  perf decision, not a correctness one.

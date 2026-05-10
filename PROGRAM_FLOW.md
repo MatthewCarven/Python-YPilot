@@ -14,43 +14,73 @@ keys do what*, see [CONTROLS.md](CONTROLS.md).
 main() loop
 ├── 1. clock.tick(FPS) → frame_dt
 ├── 2. drain pygame events (key down/up, mouse click, quit)
-│        ↳ KEYDOWN handles all the "edge-triggered" inputs:
-│          R reset, Space pause, N queue burn, Backspace pop,
-│          Enter commit, F-keys, etc.
+│        ↳ if seed_prompt_active: route ALL keystrokes to the prompt
+│           (digits append, Backspace pops, Enter commits, Esc cancels)
+│        ↳ otherwise KEYDOWN handles edge-triggered inputs:
+│          R / Shift+R / Ctrl+Shift+R, Space pause, N queue burn,
+│          Backspace pop, Enter commit, F-keys (incl. Ctrl/Shift+F1..F9
+│          save/load slots), Shift+F10 AA toggle, F2/F3 quicksave/load
 ├── 3. read keys + mods (level-triggered: held W/S/Q/E, B build hold)
 ├── 4. determine in_build_mode and paused
-├── 5. PHYSICS PHASE (skipped if paused or in_build_mode)
+├── 5. CLICK-DRAG CAMERA PAN (LMB held + not in build / not seed prompt)
+│        ↳ accumulate world-space offset by drag-delta / zoom
+│        ↳ on release: snapshot offset, ease back to zero over
+│           CAM_PAN_RECENTER_SECONDS with easeOutCubic
+├── 6. PHYSICS PHASE (skipped if paused or in_build_mode or seed_prompt)
 │        ↳ feed frame_dt × time_scale into accumulator, capped at MAX_FRAME_DT
 │        ↳ while accumulator >= PHYSICS_DT:
 │            sim_time += PHYSICS_DT
-│            update_bodies(sim_time)               # bodies first!
-│            ship.apply_pending_maneuvers(sim_time) # chained burns
+│            update_bodies(sim_time)                # bodies first!
+│            ship.apply_pending_maneuvers(sim_time)  # chained burns
 │            ship.update(PHYSICS_DT, ...)
 │            spawn / advance enemies
 │            advance turrets, bullets
-│            cull dead entities
+│            advance AA batteries (solve, telegraph, fire) — if enabled
+│            advance missile printers (target scan + launch)
+│            advance missiles (gravity-affected)
+│            missile detonation: AA first, then UFOs
+│            bullet vs body / ship / enemy collision
+│            cull dead entities (also detach dead printers from pads)
 │            accumulator -= PHYSICS_DT
-├── 6. CAMERA PHASE
+├── 7. CAMERA PHASE
 │        ↳ if paused with planned chain: camera follows the orange line
 │        ↳ otherwise: camera = ship.pos
-├── 7. RENDER PHASE
+│        ↳ apply cam_pan_offset on top (drag offset / ease-back)
+├── 8. RENDER PHASE
 │        ↳ background, stars, orbit rails
-│        ↳ live trajectory + markers (cyan)
+│        ↳ live trajectory + markers (cyan, via predict cache)
 │        ↳ plan-mode trajectory + chain chevrons (orange, paused only)
-│        ↳ bodies, deposits, build pads, turrets, bullets, enemies
+│        ↳ bodies, deposits, build pads, turrets, missile printers,
+│           AA batteries, bullets, missiles + their orange flight plans,
+│           enemies
 │        ↳ mining beam, ship
 │        ↳ HUD (always native screen pixels)
 │        ↳ build menu (if in_build_mode)
+│        ↳ seed prompt (if seed_prompt_active)
+│        ↳ HUD message toast (if hud_message unexpired)
 │        ↳ REC indicator (if recording)
-├── 8. pygame.display.flip()
-└── 9. recorder.feed(screen)            # AFTER flip — records what user saw
+├── 9. pygame.display.flip()
+└── 10. recorder.feed(screen)           # AFTER flip — records what user saw
 ```
 
 The phase boundaries are deliberate. Inputs are read once; physics
 advances in fixed `PHYSICS_DT` chunks; camera and render happen once per
 frame at the *current* sim state. The accumulator drains to zero on
-pause/build-mode entry so resume doesn't kick off a burst of catch-up
-steps.
+pause/build-mode/seed-prompt entry so resume doesn't kick off a burst of
+catch-up steps.
+
+### Seed-prompt modal (Ctrl+Shift+R)
+
+Setting `seed_prompt_active = True` makes the event handler swallow
+**every** KEYDOWN — digits append to `seed_prompt_buffer`, Backspace
+pops, Enter commits and rebuilds the world from the entered seed, Esc
+cancels. The `continue` in the event branch is what prevents stray
+W/S/H/etc. from leaking through to the normal handlers and accidentally
+flying the ship while you're typing a seed.
+
+The physics phase guard `if not in_build_mode and not paused and not
+seed_prompt_active` makes the prompt freeze the sim — same pattern as
+plan-mode's pause.
 
 ## Frame loop order (load-bearing)
 
@@ -395,14 +425,24 @@ orange line actually started, off by a few pixels at high zoom.
 `body.pos + landed_radial × (body.radius + LAUNCH_PAD_HEIGHT)` as
 `pos0`, mirroring `commit_planned_burn`'s pre-burn state.
 
-## Reset (R) flow
+## Reset (R / Shift+R / Ctrl+Shift+R) flow
 
-`R` resets everything to a deterministic starting state:
+`R` resets the **active** universe — default on first launch, or
+whichever random seed was last summoned this session. `Shift+R` rolls
+a fresh random universe and adopts it as the active one. `Ctrl+Shift+R`
+opens the seed prompt (modal); on Enter it adopts the entered seed as
+the active universe and rebuilds.
 
 ```python
 sim_time = 0.0
-bodies, planet, sun, deposits, pads, turrets, bullets, enemies = build_world()
-ship.reset(planet)
+# Shift+R rolls a fresh seed first:
+#   if event.mod & SHIFT: current_universe = {"type": "random", "seed": rng.randrange(2**31)}
+# Otherwise current_universe is whatever it already was.
+bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
+    build_world_for(current_universe)
+)
+missiles = []
+ship.reset(planet)                       # planet here = innermost landable
 enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
 kills = 0
 paused = False
@@ -410,20 +450,30 @@ plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
 maneuver_queue.clear()
 plan_burn_offset = 0.0
 time_scale = TIME_SCALE_DEFAULT
+predict_cache["age"] = PREDICT_CACHE_INTERVAL  # force a refresh on next render
 ```
 
 Note that `R` does *not* stop a recording in progress — F9 is a separate
-toggle. Predict window, predict step count, zoom, fullscreen, and the
-recorder all persist across resets.
+toggle. Predict window, predict step count, zoom, fullscreen, the
+recorder, AA-enabled / enemies-enabled toggles, and the camera pan
+offset all persist across resets. The active universe choice is **not**
+persisted to disk — a fresh launch always starts on default, even if
+you'd rolled a seed in the previous session.
 
-## Pause and build-mode skip the physics phase
+The `planet` slot returned by `build_world_for` is the innermost
+landable body (the "starter") regardless of universe shape — `ship.reset`
+spawns the player on that body, so the ship always lands on a sensible
+starting world without code knowing the actual layout.
 
-Both `paused = True` and `in_build_mode = True` cause the physics phase
-to be skipped entirely. The accumulator is drained to zero on the same
-frame so resuming doesn't kick off a burst of catch-up steps:
+## Pause, build-mode, and seed-prompt skip the physics phase
+
+`paused = True`, `in_build_mode = True`, and `seed_prompt_active = True`
+all cause the physics phase to be skipped entirely. The accumulator is
+drained to zero on the same frame so resuming doesn't kick off a burst
+of catch-up steps:
 
 ```python
-if not in_build_mode and not paused:
+if not in_build_mode and not paused and not seed_prompt_active:
     physics_accumulator = min(
         physics_accumulator + frame_dt * time_scale, MAX_FRAME_DT
     )
@@ -438,3 +488,49 @@ else:
 there's an unoccupied build pad in range. Releasing B drops back into
 the physics phase the next frame. Pause is a toggle — Space once to
 enter, Space again to leave (or Enter to commit a chain and leave).
+The seed prompt is also a toggle — Ctrl+Shift+R to open, Enter (commits)
+or Esc (cancels) to close.
+
+## Save / load (F2/F3 + Ctrl/Shift+F1..F9)
+
+`_do_quicksave(slot)` and `_do_quickload(slot)` are local closures in
+`main()` that capture every world+state local via `nonlocal` so the
+F-key handlers can reduce to a single call regardless of slot. Slot 0
+is the legacy single-slot quicksave (F2 / F3); slots 1–9 are addressed
+by Ctrl+F1..F9 (save) and Shift+F1..F9 (load).
+
+### Save flow
+
+```
+save_session(path, current_universe, sim_time, ship, camera, deposits,
+             pads, turrets, enemies, batteries, kills, ...)
+1. Serialise to JSON in memory
+2. Write to path.tmp
+3. If path exists, rename path → path.bak (rotate the previous save)
+4. Rename path.tmp → path
+```
+
+A crash mid-step-2 corrupts only the `.tmp`; the active slot stays
+intact. `.bak` is a one-step rollback for accidental overwrites.
+
+### Load flow
+
+```
+load_session_file(path) -> dict | None      # None if file missing
+                                            # — handler toasts "no save in slot N"
+build_world_for(loaded["universe"])         # Phase 1: rebuild world
+apply_session(loaded, ship, camera, ...)    # Phase 2: overlay state
+```
+
+The two-phase split is load-bearing: `apply_session` looks bodies up by
+name, so the world must exist before state can be re-bound to it. Bodies
+not found in the new world (mismatched names, e.g. loading a default
+save into a random universe by hand) trigger a partial-restore warning
+toast.
+
+### Version mismatch
+
+`SAVE_VERSION = 2` is stored in every save. On load, if the saved
+version doesn't match, `apply_session` does a best-effort restore and
+returns `partial = True`; the toast becomes "save partially restored
+(vN -> vM)" instead of "QUICKLOADED".

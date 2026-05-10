@@ -71,12 +71,18 @@ A magenta diamond outline marks the predicted closest pass to the
 *nearest non-anchor* landable body — different shape from the peri/apo
 dots so it doesn't compete visually.
 
-With three landable bodies (Planet, Moon, Ember), the marker picks the
-most useful "next destination":
+In the default world (Planet, Moon, Ember, Frostbite) the marker picks
+the most useful "next destination":
 
 - Near Planet → marker tracks the Moon.
 - Near Moon → marker tracks Planet.
 - Near Ember → marker tracks the Planet system.
+- Near Frostbite → marker tracks Ember (or Planet if Ember is on the
+  far side of the Sun at predict-time).
+
+In a random universe (`Shift+R`) the same logic applies, just with
+whatever planets / moons rolled — the marker is always *the closest
+landable body that isn't your current orbit anchor*.
 
 The HUD label `(vs <body>)` tells you which one. To set up a Hohmann
 transfer: burn prograde at apo (or peri, whichever is on the right

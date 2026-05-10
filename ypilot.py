@@ -3,17 +3,19 @@ YPilot - Tier 2: simple solar system
 ====================================
 A small XPilot / Escape Velocity-inspired space game.
 
-Flight + survival in a multi-body system: a sun at world origin and a planet
-that orbits it on circular Keplerian rails. The ship feels gravity from
-*both* bodies. Land on the planet to refuel, mine ore from spike outcrops,
-construct turrets at build pads, defend against UFOs that drift in from
-off-screen.
+Flight + survival in a multi-body system: a sun at world origin plus
+several planets / moons on Keplerian rails (default world is circular,
+random universes via Shift+R use elliptical orbits up to e=0.3). The
+ship feels gravity from every body simultaneously. Land on a body to
+refuel, mine ore from spike outcrops, construct turrets / missile
+printers at build pads, dodge planetary AA fire, and defend against
+UFOs that drift in from off-screen.
 
 Window auto-sizes to the user's desktop resolution. Zoom in/out with +/-.
 
 Controls:
     Mouse              aims the ship's nose at the cursor (primary aim;
-                       suppressed for ~0.75s after liftoff -- the ship
+                       suppressed for ~0.30s after liftoff -- the ship
                        fires full boost vertically during this window
                        regardless of input, then steering returns to you)
     Left  / A          rotate counter-clockwise (keyboard fallback)
@@ -58,7 +60,7 @@ Controls:
                        Disabled while build mode (B) or the seed prompt
                        is intercepting clicks.
     /                  shorter trajectory prediction window (down to 5s)
-    *                  longer trajectory prediction window (up to 5min)
+    *                  longer trajectory prediction window (up to ~16.7min)
     F1                 toggle HUD text overlay (world content stays visible)
     F2 / F3            quickload / quicksave to the default slot
                        (saves/quicksave.json -- the legacy single-slot
@@ -95,6 +97,7 @@ Controls:
                        duration in 0.1s steps; current value shown on HUD.
                        Duration is signed -- step past 0 into negatives to
                        plan a retro burn without flipping the mouse 180°.
+    Shift + [ / ]      (paused only) duration step at 1.0s (leap)
     Ctrl + [ / ]       (paused only) duration step at 0.01s (precision)
     Ctrl+Shift + [ / ] (paused only) duration step at 0.001s (extra-fine)
     Alt + [ / ]        (paused only) duration step at 0.0001s (super-fine)
@@ -105,6 +108,7 @@ Controls:
                        expanding predict_seconds. Floor is the previous
                        queued burn's offset (chain stays monotonic);
                        ceiling is PREDICT_MAX_SECONDS.
+    Shift + , / .      (paused only) offset step at 1.0s (leap)
     Ctrl + , / .       (paused only) offset step at 0.01s (precision)
     Ctrl+Shift + , / . (paused only) offset step at 0.001s (extra-fine)
     Alt + , / .        (paused only) offset step at 0.0001s (super-fine)
@@ -4577,11 +4581,13 @@ def main() -> None:
         # right now. Stays consistent with the HUD's "vs <body>" labelling.
         apsis_anchor = nearest_landable(ship.pos, bodies) if ship.alive else None
         # Closest-approach target: the *nearest* landable body that isn't the
-        # apsis anchor. With three landable bodies (Planet, Moon, Ember) this
-        # picks the most useful "next destination" -- near Planet you see
-        # your closest pass to Moon, near Moon you see Planet, near Ember
-        # you see Planet. Falls back to None when the only landable body in
-        # scene is the anchor itself.
+        # apsis anchor. With four landable bodies (Planet, Moon, Ember,
+        # Frostbite) this picks the most useful "next destination" -- near
+        # Planet you see closest pass to Moon, near Moon you see Planet,
+        # near Ember you see Planet (or Frostbite when it's geometrically
+        # closer), near Frostbite you see Ember (or Planet). Random universes
+        # apply the same logic to whichever bodies rolled. Falls back to
+        # None when the only landable body in scene is the anchor itself.
         ca_target: Body | None = None
         if apsis_anchor is not None:
             best_d2 = float("inf")

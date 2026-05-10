@@ -15,7 +15,7 @@ There is **no test suite, no linter config, and no build step**. The project is 
 
 ## Repository shape
 
-The entire game lives in a single file: `ypilot.py` (~3200 lines). There is no module split, no asset pipeline, no ECS. Every game object is a small class with `update()` / `draw()` methods, and `main()` drives the loop. The codebase deliberately trades modular fanciness for diff-readability.
+The entire game lives in a single file: `ypilot.py` (~4500 lines). There is no module split, no asset pipeline, no ECS. Every game object is a small class with `update()` / `draw()` methods, and `main()` drives the loop. The codebase deliberately trades modular fanciness for diff-readability.
 
 The repo root is **not a git repository**.
 
@@ -32,7 +32,7 @@ The author has split design docs by topic. Always consult the relevant doc(s) be
 
 These are the load-bearing rules that surface bugs if violated. They are documented at length in PROGRAM_FLOW.md "Bug-fix history" — summarised here as a reminder of *what* to be careful about:
 
-1. **Body update order matters.** `update_bodies(t)` walks Sun → Planet → Moon → Ember → Frostbite. Each child reads its parent's freshly-updated `pos`/`vel`, so the order is fixed.
+1. **Body update order matters.** `update_bodies(t)` walks parents before children — for the default world that's Sun → Planet → Moon → Ember → Frostbite, but in random universes (`Shift+R`) the order is whatever `make_random_solar_system` returns: Sun first, then heliocentric planets, then moons after their parent planet. Each child reads its parent's freshly-updated `pos`/`vel`, so the dependency-order invariant is fixed regardless of layout.
 2. **`update_bodies(sim_time)` runs before `ship.update(dt, ...)` each physics tick.** Body state is frozen during ship update; multiple subsystems (launch-pad bump, brake-assist target velocity, trajectory predictor sampling) depend on this freeze. Don't interleave body and ship updates within a frame.
 3. **Predictor and live integrator share the same `PHYSICS_DT` leapfrog step** for short horizons. This bit-equivalence is why path-hold can track an orange line as if it were the live trajectory. The predictor uses `body.position_at(t)` (closed-form, stateless) while the live sim uses `body.pos` (live state) — keep these two paths in sync if you change body motion.
 4. **Path-hold corrective accel is computed ONCE per `Ship.update()`** (against start-of-step state) and cached on `self._path_hold_cached_accel`. Both leapfrog half-kicks read the cached value via `_compute_accel`. Computing fresh per half-kick reintroduces a one-step phase offset the controller would burn fuel fighting forever.

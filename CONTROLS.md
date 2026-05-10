@@ -248,8 +248,10 @@ want it.
 | **Shift + F10** | Toggle planetary AA batteries. About 50% of landable bodies are rolled with a body-mounted battery at world build (deterministic from the world seed). Each battery solves a real intercept against your ship's gravity-affected predicted trajectory, paints a 1 s targeting laser to the predicted hit point, then fires a straight-line bullet. The solver refuses to converge while you're burning (W/S) — that's the dodge escape hatch. Same damage as a UFO collision. |
 | **F11** | Toggle fullscreen. |
 | **F12** | Save a screenshot (PNG) into `./captures/` (created if missing). |
-| **R** | Reset world. |
-| **Esc** | Quit. |
+| **R** | Reset the active world. On first launch this is the hand-tuned default system; once you've rolled a random universe with **Shift+R** or **Ctrl+Shift+R** in the current session, **R** rebuilds *that* universe instead. The choice isn't persisted across launches — start the game and you're always back on default. |
+| **Shift + R** | Reset to a freshly-rolled random universe. 1–6 planets, optional moons (≤2 per planet, ≤4 total), eccentricity ≤ 0.3. The seed is printed on the HUD as a toast so a memorable roll can be re-summoned later. |
+| **Ctrl + Shift + R** | Open the custom-seed prompt — a modal overlay that freezes the sim until you commit (Enter), cancel (Esc), or backspace digits out. Lets you re-summon a specific seed shared by a friend or written down from an earlier run. |
+| **Esc** | Quit. (While the seed prompt is active, Esc cancels the prompt instead of quitting.) |
 
 ## Quick reference card
 
@@ -260,7 +262,7 @@ Q/E strafe     H brake-assist      J path-hold     B (hold) build
 F1 HUD toggle  F2/F3 quickload/save  F4 minimise   F5/F6 steps  F7/F8 time scale
 F9 record      F10 enemies           F11 full      F12 shot
 Ctrl+F1..F9 save slot N    Shift+F1..F9 load slot N
-R reset        Esc quit
+R reset        Shift+R random universe    Ctrl+Shift+R seed prompt    Esc quit
 
 Plan mode (Space):
   Mouse aims burn  [ / ] duration   , / . fire-time
