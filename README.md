@@ -51,7 +51,7 @@ Look I did compile a .exe for everyone who needs one but honestly
 first run I hear can be brutal to wait for it to extract but should
 work fine (if you wait and the .exe is still in task manager like)
 
-https://drive.google.com/file/d/1U0wIKRsbXibtARpiGrgkBm4kyR-SV0pb/view?usp=sharing
+[https://drive.google.com/file/d/1U0wIKRsbXibtARpiGrgkBm4kyR-SV0pb/view?usp=sharing](https://drive.google.com/file/d/108XxFwujjXpGakBH_k-pKd6MT_YiHAtl/view?usp=sharing)
 
 Heads up: Windows SmartScreen will pop a blue "Windows protected
 your PC" panel on first run because the .exe isn't code-signed
