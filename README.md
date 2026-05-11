@@ -24,10 +24,12 @@ role:
 
 Or roll a **random universe** with `Shift+R` — 1 to 6 planets, optional
 moons, eccentric orbits up to e ≤ 0.3. The seed is printed on the HUD
-so memorable rolls can be re-summoned via `Ctrl+Shift+R`'s seed prompt.
-Same gameplay arc regardless of layout: innermost planet gets the
-starter deposits + most of the pads, outermost gets the bulk of the ore
-and zero pads, the middle bodies pick up forward-base pads.
+so memorable rolls can be re-summoned via `Ctrl+Shift+R`'s seed prompt,
+or pin the planet count directly with `Ctrl+Alt+Shift+1..6` (handy for
+testing single-planet collapse or two-planet Hohmann shapes). Same
+gameplay arc regardless of layout: innermost planet gets the starter
+deposits + most of the pads, outermost gets the bulk of the ore and
+zero pads, the middle bodies pick up forward-base pads.
 
 ## Run
 

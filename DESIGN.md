@@ -104,10 +104,18 @@ orbits are faster (`v = √(μ/r)`). Intercepts are real puzzles, not just
 
 ## Random universes
 
-`Shift+R` rolls a fresh universe; `Ctrl+Shift+R` opens a digit-only
-modal prompt for a specific seed (the latter is how you re-summon a
-memorable roll across sessions). `make_random_solar_system(seed)` is
-deterministic — same seed, same world.
+`Shift+R` rolls a fresh universe with a random planet count; `Ctrl+Shift+R`
+opens a digit-only modal prompt for a specific seed (the latter is how
+you re-summon a memorable roll across sessions). `Ctrl+Alt+Shift+1..6`
+rolls a fresh universe with a **pinned** planet count — useful for
+quickly testing single-planet collapse, two-planet Hohmann setups, etc.
+without spam-rolling Shift+R until the right count appears.
+
+`make_random_solar_system(seed, n_planets_override=None)` is
+deterministic — same `(seed, n_planets)` pair, same world. The override
+short-circuits the natural `rng.randint(1, 6)` planet-count roll *after*
+the randint has been called, so rng state stays in lockstep up to that
+point; only the count itself diverges.
 
 ### Layout
 
@@ -571,11 +579,24 @@ sensible values; fields the new version removed are silently ignored.
 
 ### Universe in the save
 
-Each save stores the active universe spec (`{"type": "default"}` or
-`{"type": "random", "seed": int}`). On load, `build_world_for(spec)`
-re-seeds the random generator before applying ship state, so a
-quickload of a random universe lands you back on the same world even
-though the seed was rolled in a previous session.
+Each save stores the active universe spec. Three shapes:
+
+```json
+{"type": "default"}
+{"type": "random", "seed": 1234567890}
+{"type": "random", "seed": 1234567890, "n_planets": 3}
+```
+
+The `n_planets` field is only present for universes rolled via
+`Ctrl+Alt+Shift+1..6`. It's optional — older saves (and `Shift+R`
+saves) don't carry it, and `spec.get("n_planets")` returns None,
+which makes `make_random_solar_system` fall back to its natural
+`rng.randint(1, 6)` planet-count roll. Backward compatible.
+
+On load, `build_world_for(spec)` re-seeds the random generator before
+applying ship state, so a quickload of a random universe lands you
+back on the same world even though the seed was rolled in a previous
+session.
 
 Bodies are referenced by `name` (e.g., `"P3M1"`) in the save; on load
 they're looked up against the freshly-rebuilt world. Mismatched names
