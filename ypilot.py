@@ -55,7 +55,7 @@ Controls:
     0                  reset zoom to 1.0
     Mouse wheel        peek zoom -- temporary multiplier off the resting
                        zoom, eases back to the rest over
-                       CAM_ZOOM_RECENTER_SECONDS (default 7s,
+                       CAM_ZOOM_RECENTER_SECONDS (default 11s,
                        easeOutCubic). Spam-scroll holds the peek;
                        pausing kicks off the return.
     LMB drag           pan the viewport off-ship for surveys of large
@@ -310,8 +310,11 @@ CAM_PAN_RECENTER_SECONDS = 7.0
 # Mouse-wheel "peek" zoom: each wheel tick multiplies a peek factor off
 # the resting zoom (set by +/- and 0); the factor eases back to 1.0 over
 # CAM_ZOOM_RECENTER_SECONDS so the camera always wants to come home to
-# the zoom level the player explicitly chose. Mirrors the pan ease-back.
-CAM_ZOOM_RECENTER_SECONDS = 7.0
+# the zoom level the player explicitly chose. Longer than the pan ease-
+# back because zoom is the more disorienting axis to snap on -- a slower
+# return gives the eye time to track the world rather than feeling the
+# scale change.
+CAM_ZOOM_RECENTER_SECONDS = 11.0
 
 # --- Fuel -------------------------------------------------------------------
 MAX_FUEL = 100.0

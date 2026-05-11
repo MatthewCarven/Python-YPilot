@@ -500,6 +500,47 @@ plan-mode-trajectory-following), so it composes naturally with both.
 Disabled while the build menu (B held) or the seed-prompt overlay is
 intercepting clicks — those workflows want LMB for their own purposes.
 
+### Wheel-peek zoom with ease-back
+
+Zoom is split into two values that compose multiplicatively:
+
+```
+camera.zoom = clamp(cam_zoom_rest × cam_zoom_peek, ZOOM_MIN, ZOOM_MAX)
+```
+
+- **`cam_zoom_rest`** — the persistent zoom level the player chooses
+  with `+` / `-` / `0`. Survives across frames; the camera's
+  "home" zoom.
+- **`cam_zoom_peek`** — a transient multiplier driven by the mouse
+  wheel. Each tick multiplies/divides by `ZOOM_STEP`; with no wheel
+  input it eases back to 1.0.
+
+Every frame the effective `camera.zoom` is rebuilt from the two
+values, so any consumer that reads `camera.zoom` (rendering, world-to-
+screen transforms) keeps working without knowing about the split.
+
+**Ease-back.** When the wheel stops, `cam_zoom_release_factor`
+snapshots the current peek and `cam_zoom_release_elapsed` ticks up
+each frame. Over `CAM_ZOOM_RECENTER_SECONDS = 11 s` the peek glides
+back to 1.0 with `easeOutCubic` — slower than the pan ease-back
+(7 s) because zoom is the more disorienting axis to snap on. A
+faster zoom return reads as a jarring scale-change; the longer
+ease lets the eye keep tracking world content while the camera
+quietly homes back.
+
+**Spam-scroll holds the peek.** Every wheel tick resets
+`cam_zoom_release_elapsed = 0.0` and re-snapshots
+`cam_zoom_release_factor`, so as long as the player keeps scrolling
+the peek doesn't drift. Pausing the wheel kicks off the return.
+
+**Why "peek" and not "zoom"?** The persistent/transient split makes
+the keyboard `+/-` keys feel like setting a *resting* zoom for the
+session (landing-friendly, say) and the wheel feel like a glance — you
+spin out, look at a distant body, let go, and the camera comes back to
+the level you set up for the next landing. Two distinct input modes
+mapped to the same physical axis, without the wheel destroying your
+working zoom level.
+
 ## Save / load
 
 State persists to disk via `save_session` / `apply_session`. F3
@@ -635,6 +676,7 @@ tweaked by feel:
 | `MISSILE_PLAN_HORIZON` | 12.0 | Seconds the at-launch flight planner integrates forward |
 | `MISSILE_BLAST_RADIUS` | 18 | Detonation proximity radius |
 | `CAM_PAN_RECENTER_SECONDS` | 7.0 | LMB-drag camera ease-back duration |
+| `CAM_ZOOM_RECENTER_SECONDS` | 11.0 | Wheel-peek zoom ease-back duration (longer than pan: zoom is more disorienting to snap on) |
 | `SAVE_VERSION` | 2 | Save-file format version (best-effort load on mismatch) |
 | `HUD_MESSAGE_DURATION` | 2.5 | Toast lifetime (F2/F3, Shift+R, AA toggle, etc.) |
 | `PREDICT_MAX_SECONDS` | 1000 | Predictor look-ahead ceiling (~16.7 min) |

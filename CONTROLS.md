@@ -100,7 +100,7 @@ brake-assist, green for landed).
 | **+ / =** | Zoom in. Sets the persistent *resting* zoom that the wheel-peek eases back to. |
 | **- / _** | Zoom out. Same — sets the resting zoom. |
 | **0** | Reset zoom to 1.0× (rest + peek both snap; mid-peek easings cancel). |
-| **Mouse wheel** | "Peek" zoom — multiplies a transient factor off the resting zoom and eases back to the rest over `CAM_ZOOM_RECENTER_SECONDS` (default 7 s, easeOutCubic). Spam-scroll holds the peek (each tick resets the timer); pausing the wheel kicks off the return. Useful for glancing at a far-off body without losing your landing-friendly resting zoom. |
+| **Mouse wheel** | "Peek" zoom — multiplies a transient factor off the resting zoom and eases back to the rest over `CAM_ZOOM_RECENTER_SECONDS` (default 11 s, easeOutCubic). Spam-scroll holds the peek (each tick resets the timer); pausing the wheel kicks off the return. Useful for glancing at a far-off body without losing your landing-friendly resting zoom. |
 | **LMB drag** | Pan the viewport off-ship for surveys of large systems where max zoom-out still doesn't fit. Release and the camera eases back to the ship over `CAM_PAN_RECENTER_SECONDS` (default 7 s, easeOutCubic). Disabled while build mode (**B**) or the seed prompt is intercepting clicks. |
 | `/` | Shorter trajectory prediction window (down to 5 s). |
 | `*` | Longer prediction window (up to ~16.7 min). |
