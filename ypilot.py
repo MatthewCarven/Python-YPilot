@@ -2807,8 +2807,9 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              plan_ca_alt: float | None = None,
              chain_queue_size: int = 0,
              chain_burn_count: int = 1,
-             pending_count: int = 0,
+             pending_maneuvers: list | None = None,
              plan_burn_offset: float = 0.0,
+             sim_time: float = 0.0,
              time_scale: float = 1.0,
              universe_spec: dict | None = None) -> None:
     if ship.alive:
@@ -2914,9 +2915,28 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             else:
                 lines.append("  N queue this burn (chain mode)   "
                              "Enter commit burn   Space resume without burning")
-        elif pending_count > 0:
+        # Always-visible committed burn queue. Shows alongside the
+        # plan-mode block while paused (so the player can see what's
+        # already armed while editing the chain) and on its own while
+        # flying. Burn tuple shape: (t_apply, burn_dir_unit, duration_signed)
+        # -- matches ship.pending_maneuvers exactly. Direction angle is the
+        # burn_dir vector angle in pygame screen-space convention (east=0,
+        # increasing clockwise because y is flipped); a negative duration
+        # is a retro burn from the same aim point.
+        if pending_maneuvers:
             lines.append("")
-            lines.append(f"CHAIN ARMED   {pending_count} burn(s) pending")
+            n = len(pending_maneuvers)
+            lines.append(
+                f"CHAIN ARMED   {n} burn{'s' if n != 1 else ''} pending"
+            )
+            for i, (t_apply, burn_dir, dur) in enumerate(pending_maneuvers):
+                remaining = max(0.0, t_apply - sim_time)
+                angle_deg = math.degrees(math.atan2(burn_dir.y, burn_dir.x))
+                dv = SHIP_THRUST * abs(dur)
+                lines.append(
+                    f"  #{i + 1}  t+{remaining:6.2f}s   "
+                    f"{dur:+6.3f}s ({dv:5.1f} dv)   @ {angle_deg:+4.0f}°"
+                )
         lines += [
             "",
             "Mouse aim  W/S/Shift/Ctrl thrust  H brake  J path-hold  B build",
@@ -5066,8 +5086,9 @@ def main() -> None:
                      live_ca_alt=live_ca_alt, plan_ca_alt=plan_ca_alt,
                      chain_queue_size=len(maneuver_queue),
                      chain_burn_count=chain_burn_count,
-                     pending_count=len(ship.pending_maneuvers),
+                     pending_maneuvers=ship.pending_maneuvers,
                      plan_burn_offset=plan_burn_offset,
+                     sim_time=sim_time,
                      time_scale=time_scale,
                      universe_spec=current_universe)
 
