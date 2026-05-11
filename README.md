@@ -41,6 +41,7 @@ python ypilot.py
 Look I did compile a .exe for everyone who needs one but honestly
 first run I hear can be brutal to wait for it to extract but should
 work fine (if you wait and the .exe is still in task manager like)
+https://drive.google.com/file/d/1U0wIKRsbXibtARpiGrgkBm4kyR-SV0pb/view?usp=sharing
 
 ## F9 Video recording
 This requires ffmpeg to install windows key + R (or start run if
