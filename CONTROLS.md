@@ -13,8 +13,26 @@ are read each frame, see [PROGRAM_FLOW.md](PROGRAM_FLOW.md).
 | Input | Effect |
 |---|---|
 | **Mouse** | Aims the ship's nose at the cursor. Suppressed for ~0.3 s after liftoff (`TAKEOFF_LOCK_SECONDS`) so a fresh launch climbs cleanly upward instead of being yanked sideways by an off-centre cursor. |
-| **A / Left** | Rotate counter-clockwise (keyboard fallback). |
-| **D / Right** | Rotate clockwise (keyboard fallback). |
+| **A** | Rotate counter-clockwise (keyboard-only fallback; mouse aim usually overrides this every frame in flight). |
+| **D** | Rotate clockwise (keyboard-only fallback). |
+
+### Cursor nudge (Left / Right / Up / Down arrow)
+
+Burn angle and ship heading both come from `(mouse_pos - screen_center)`, so the precision-aim mechanism is *nudging the cursor*, not rotating the ship directly. The arrow keys move the cursor by a small number of pixels each frame they're held. At max zoom-out near the screen edge, a 1-pixel cursor delta translates to a hair of angle change — exactly the resolution you want when fine-tuning a Hohmann insertion or lining up a landing.
+
+Hold an arrow for a smooth sweep; tap once for a single-frame nudge. Modifiers scale the step the same way they scale duration / fire-time in plan mode:
+
+| Combo | Step (px/frame) | Sweep speed (60 FPS) |
+|---|---|---|
+| **arrow** | 4 | ~240 px/s |
+| **Shift + arrow** | 12 | ~720 px/s (fast traversal) |
+| **Ctrl + arrow** | 2 | ~120 px/s (precision) |
+| **Ctrl + Shift + arrow** | 1 | ~60 px/s (pixel-by-pixel) |
+| **Alt + arrow** | 1 | ~60 px/s (pixel-by-pixel) |
+
+Works in flight, plan-mode, and build-mode. Disabled while the **Ctrl+Shift+R** seed-prompt overlay is intercepting keystrokes (the cursor would flicker for no reason).
+
+Cross-platform via `pygame.mouse.set_pos()` — SDL2 calls the right platform API under the hood (`SetCursorPos` on Windows, `CGWarpMouseCursorPosition` on macOS, `XWarpPointer` on X11, compositor pointer-locking on Wayland).
 
 ## Forward thrust (W / Up)
 
@@ -259,6 +277,7 @@ want it.
 
 ```
 Mouse aim      A/D rotate          W/S thrust (Shift=5x, Ctrl=1%, Ctrl+Shift=0.1%)
+Arrows nudge cursor (Shift=fast, Ctrl=fine, Ctrl+Shift / Alt=pixel)
 Q/E strafe     H brake-assist      J path-hold     B (hold) build
 +/- zoom       0 reset zoom        / shorter pred  * longer pred
 F1 HUD toggle  F2/F3 quickload/save  F4 minimise   F5/F6 steps  F7/F8 time scale

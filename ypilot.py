@@ -18,8 +18,19 @@ Controls:
                        suppressed for ~0.30s after liftoff -- the ship
                        fires full boost vertically during this window
                        regardless of input, then steering returns to you)
-    Left  / A          rotate counter-clockwise (keyboard fallback)
-    Right / D          rotate clockwise        (keyboard fallback)
+    A                  rotate counter-clockwise (keyboard fallback;
+                       mouse-aim usually overrides this each frame)
+    D                  rotate clockwise (keyboard fallback)
+    Left / Right / Up / Down  nudge the mouse cursor by N pixels.
+                       Burn angle / ship heading come from
+                       (mouse_pos - screen_center), so cursor nudging
+                       is the precision-aim mechanism -- 1 px near the
+                       screen edge under max zoom-out is a hair of
+                       angle change. Held keys produce a smooth sweep.
+    Shift + arrow      cursor nudge at leap step (~720 px/s sweep)
+    Ctrl + arrow       cursor nudge at precision step (~120 px/s)
+    Ctrl+Shift + arrow cursor nudge fine step (~60 px/s, pixel-by-pixel)
+    Alt + arrow        cursor nudge fine step (~60 px/s, pixel-by-pixel)
     Up    / W          thrust forward
     Shift + Up/W       thrust forward at 5x normal (boost - escape velocity)
     Ctrl  + Up/W       thrust forward at 1% normal (precision)
@@ -160,6 +171,12 @@ Controls:
     Ctrl+Shift + R     prompt for a specific random-universe seed
                        (digits, Enter to commit, Esc to cancel). Lets you
                        re-summon a seed shared by a friend / written down.
+    Ctrl+Alt+Shift+1..6  roll a fresh random universe with exactly
+                       N planets (rather than the random 1-6 count
+                       Shift+R picks). Fresh seed each press; useful
+                       for quickly testing N-planet shapes without
+                       spam-rolling. (seed, n_planets) pair is stored
+                       on the universe spec so saves reproduce it.
     Esc                quit
 
 Run:
@@ -302,6 +319,19 @@ LATERAL_THRUST_SCALE = 0.1       # Q / E strafe thrusters; same magnitude
                                  # as default retro for symmetric feel
 
 MOUSE_AIM_DEADZONE_SQ = 9.0
+
+# Arrow-key cursor nudge. Mouse aim overrides the keyboard ship-rotation
+# every frame in flight, which made the bare arrow-key rotation binding
+# effectively dead. The arrow keys are repurposed to nudge the cursor by
+# N pixels per frame -- since burn angle / ship heading are derived from
+# (mouse_pos - screen_center), nudging the cursor is the precision-aim
+# tool. A/D / Left+A combo retained for keyboard-only rotation.
+# Step ladder mirrors the duration / offset ladders in plan mode:
+# Shift = leap, Ctrl = precision, Ctrl+Shift = fine, Alt = pixel-perfect.
+ARROW_NUDGE_STEP = 4          # plain arrow: ~240 px/s sweep at 60 FPS
+ARROW_NUDGE_LEAP = 12         # Shift + arrow: fast traversal (~720 px/s)
+ARROW_NUDGE_PRECISION = 2     # Ctrl + arrow: precision sweep (~120 px/s)
+ARROW_NUDGE_FINE = 1          # Ctrl+Shift + arrow / Alt + arrow: pixel-by-pixel
 
 # Click-drag viewport pan: LMB-drag pulls the camera off the ship for
 # wider surveys of big systems; release eases it back. Tunable by feel.
@@ -777,7 +807,9 @@ RANDOM_PALETTE = [
 ]
 
 
-def make_random_solar_system(seed: int) -> list[Body]:
+def make_random_solar_system(seed: int,
+                             n_planets_override: int | None = None
+                             ) -> list[Body]:
     """Generate a randomised Sun + planets (+moons) system from a 32-bit seed.
 
     Returns bodies in update_bodies-safe order: sun first, then heliocentric
@@ -789,6 +821,12 @@ def make_random_solar_system(seed: int) -> list[Body]:
     raw shells separated by a comfortable factor; a two-pass eccentricity
     roll then samples e_k <= min(MAX_E, gap/a) so periapsis/apoapsis can't
     overlap a neighbour. Pass 1 uses provisional e_next=0; pass 2 refines.
+
+    `n_planets_override` (Ctrl+Alt+Shift+1..6 quick-roll) forces a specific
+    planet count, clamped to [1, RANDOM_PLANETS_MAX]. The natural randint
+    still runs first so the rng state stays consistent up to that point;
+    only the count itself is overridden. Saved universe specs carry the
+    override field so quickloads reproduce the same world.
     """
     rng = random.Random(seed)
     sun = Body(
@@ -797,7 +835,14 @@ def make_random_solar_system(seed: int) -> list[Body]:
     )
     bodies: list[Body] = [sun]
 
-    n_planets = rng.randint(RANDOM_PLANETS_MIN, RANDOM_PLANETS_MAX)
+    # Always call randint so the rng state advances identically whether the
+    # override is used or not -- the natural roll is just thrown away when
+    # an override is provided.
+    n_planets_natural = rng.randint(RANDOM_PLANETS_MIN, RANDOM_PLANETS_MAX)
+    if n_planets_override is not None:
+        n_planets = max(1, min(RANDOM_PLANETS_MAX, int(n_planets_override)))
+    else:
+        n_planets = n_planets_natural
     semi_major: list[float] = []
     a = rng.uniform(RANDOM_FIRST_AXIS_MIN, RANDOM_FIRST_AXIS_MAX)
     for _ in range(n_planets):
@@ -1749,9 +1794,15 @@ class Ship:
                     self.angle = target
 
         if steering_active:
-            if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            # Note: arrow keys are NOT bound here. They're handled in the
+            # main loop as a cursor-nudge: since the mouse-aim block above
+            # overrides keyboard rotation every frame anyway (cursor wins),
+            # the arrow-key rotation binding was effectively dead. Now they
+            # nudge the cursor instead, which is the actual precision-aim
+            # tool. A/D remain the keyboard-only rotation fallback.
+            if keys[pygame.K_a]:
                 self.angle -= SHIP_TURN_RATE * dt
-            if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            if keys[pygame.K_d]:
                 self.angle += SHIP_TURN_RATE * dt
 
         self._read_thrust_input(keys, mods)
@@ -3015,7 +3066,15 @@ def build_world_for(spec: dict) -> tuple[
     handful of pads each; moons get a couple of pads.
     """
     if spec.get("type") == "random":
-        bodies = make_random_solar_system(int(spec["seed"]))
+        # n_planets is an optional override stored on the spec when the
+        # user picked a specific count via Ctrl+Alt+Shift+1..6. Older
+        # saves predating the feature won't have it; .get() returns
+        # None and make_random_solar_system falls back to the natural
+        # randint roll.
+        bodies = make_random_solar_system(
+            int(spec["seed"]),
+            n_planets_override=spec.get("n_planets"),
+        )
     else:
         bodies = make_solar_system()
     sun = bodies[0]
@@ -3264,6 +3323,21 @@ SAVES_DIR = "saves"
 QUICKSAVE_NAME = "quicksave"
 HUD_MESSAGE_DURATION = 2.5
 
+# Application directory resolution. In a normal `python ypilot.py` run
+# this is just the directory ypilot.py lives in. Under PyInstaller
+# (--onefile or --onedir), `__file__` resolves to a path inside the
+# temp extract directory that gets wiped on exit -- screenshots, video
+# captures, and quicksaves would VANISH on quit. `sys.frozen` is the
+# canonical signal that we're inside a packaged binary; `sys.executable`
+# is the actual .exe path the user double-clicked. Its parent is where
+# the user expects writable files to land (next to the .exe, like any
+# normal Windows app).
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 # Save-slot scheme: slot 0 is the legacy single-slot quicksave path
 # (so old saves keep working untouched). Slots 1-9 are addressed by
 # Ctrl+F1..F9 (save) and Shift+F1..F9 (load). Stored side-by-side in
@@ -3271,10 +3345,7 @@ HUD_MESSAGE_DURATION = 2.5
 # the default slot.
 def _save_slot_path(slot: int) -> str:
     name = QUICKSAVE_NAME if slot == 0 else f"{QUICKSAVE_NAME}_{slot}"
-    return os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        SAVES_DIR, name + ".json",
-    )
+    return os.path.join(_app_dir(), SAVES_DIR, name + ".json")
 
 
 def _v2list(v: Vector2) -> list:
@@ -4025,6 +4096,46 @@ def main() -> None:
                     plan_burn_offset = 0.0
                     time_scale = TIME_SCALE_DEFAULT
                     predict_cache["age"] = PREDICT_CACHE_INTERVAL
+                elif (pygame.K_1 <= event.key <= pygame.K_6
+                        and (event.mod & pygame.KMOD_CTRL)
+                        and (event.mod & pygame.KMOD_ALT)
+                        and (event.mod & pygame.KMOD_SHIFT)):
+                    # Ctrl+Alt+Shift+N (N=1..6) = roll a fresh random
+                    # universe with exactly N planets. Same flow as
+                    # Shift+R but with the planet count pinned, so the
+                    # player can quickly test single-planet collapse
+                    # logic, two-planet Hohmann setups, etc. without
+                    # spam-rolling Shift+R until the right count
+                    # appears. Picks a fresh seed each press; the
+                    # (seed, n_planets) pair is stored on the universe
+                    # spec so quicksaves of this universe reproduce it
+                    # exactly on load.
+                    n_planets_pin = event.key - pygame.K_1 + 1
+                    sim_time = 0.0
+                    seed = random.randrange(2 ** 31)
+                    current_universe = {
+                        "type": "random",
+                        "seed": seed,
+                        "n_planets": n_planets_pin,
+                    }
+                    bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
+                        build_world_for(current_universe)
+                    )
+                    missiles = []
+                    ship.reset(planet)
+                    enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
+                    kills = 0
+                    paused = False
+                    plan_burn_duration = PLAN_BURN_DURATION_DEFAULT
+                    maneuver_queue.clear()
+                    plan_burn_offset = 0.0
+                    time_scale = TIME_SCALE_DEFAULT
+                    predict_cache["age"] = PREDICT_CACHE_INTERVAL
+                    hud_message = (
+                        f"random universe: {n_planets_pin} planet"
+                        f"{'s' if n_planets_pin != 1 else ''}, seed {seed}",
+                        time.time() + HUD_MESSAGE_DURATION,
+                    )
                 elif event.key == pygame.K_SPACE:
                     # Leaving plan mode without committing -> drop any
                     # queued chain. Re-entering pause starts fresh.
@@ -4341,20 +4452,14 @@ def main() -> None:
                         WIDTH, HEIGHT = new_w, new_h
                 elif event.key == pygame.K_F12:
                     stamp = datetime.datetime.now().strftime("%Y-%m-%d - %H-%M-%S")
-                    out_dir = os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        "captures",
-                    )
+                    out_dir = os.path.join(_app_dir(), "captures")
                     os.makedirs(out_dir, exist_ok=True)
                     pygame.image.save(screen, os.path.join(out_dir, f"{stamp}.png"))
                 elif event.key == pygame.K_F9:
                     if recorder.recording:
                         recorder.stop()
                     else:
-                        out_dir = os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)),
-                            "captures",
-                        )
+                        out_dir = os.path.join(_app_dir(), "captures")
                         os.makedirs(out_dir, exist_ok=True)
                         recorder.start(screen.get_size(), out_dir)
             elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -4420,6 +4525,37 @@ def main() -> None:
                     # ship-centred frame -- avoids a jarring final snap.
                     ease = 1.0 - (1.0 - t) ** 3
                     cam_pan_offset = cam_pan_release_offset * (1.0 - ease)
+
+        # Arrow-key cursor nudge (level-triggered, runs every frame an
+        # arrow is held). Burn angle / ship heading are read from
+        # (mouse_pos - screen_center), so nudging the cursor is the
+        # precision-aim mechanism -- 1 px at the screen edge under max
+        # zoom-out is a hair of angle change. Modifier ladder mirrors
+        # plan-mode duration / offset: Shift = leap, Ctrl = precision,
+        # Ctrl+Shift = finer, Alt = pixel-perfect. Disabled while the
+        # seed-prompt overlay is intercepting keystrokes -- arrow keys
+        # have no role there but cursor flicker would be confusing.
+        if not seed_prompt_active:
+            arrow_dx = 0
+            arrow_dy = 0
+            if keys[pygame.K_LEFT]:  arrow_dx -= 1
+            if keys[pygame.K_RIGHT]: arrow_dx += 1
+            if keys[pygame.K_UP]:    arrow_dy -= 1
+            if keys[pygame.K_DOWN]:  arrow_dy += 1
+            if arrow_dx or arrow_dy:
+                if mods & pygame.KMOD_ALT:
+                    nudge_step = ARROW_NUDGE_FINE
+                elif (mods & pygame.KMOD_CTRL) and (mods & pygame.KMOD_SHIFT):
+                    nudge_step = ARROW_NUDGE_FINE
+                elif mods & pygame.KMOD_CTRL:
+                    nudge_step = ARROW_NUDGE_PRECISION
+                elif mods & pygame.KMOD_SHIFT:
+                    nudge_step = ARROW_NUDGE_LEAP
+                else:
+                    nudge_step = ARROW_NUDGE_STEP
+                mx, my = pygame.mouse.get_pos()
+                pygame.mouse.set_pos((mx + arrow_dx * nudge_step,
+                                       my + arrow_dy * nudge_step))
 
         # Plan mode (Space): freeze the entire simulation -- bodies, ship,
         # enemies, bullets, turrets, fuel/refuel. Time t doesn't advance, so
