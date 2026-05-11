@@ -37,6 +37,20 @@ zero pads, the middle bodies pick up forward-base pads.
 pip install pygame-ce
 python ypilot.py
 ```
+## "Precompiled" Binary
+Look I did compile a .exe for everyone who needs one but honestly
+first run I hear can be brutal to wait for it to extract but should
+work fine (if you wait and the .exe is still in task manager like)
+
+## F9 Video recording
+This requires ffmpeg to install windows key + R (or start run if
+you're indeed lucky enough to have it there) and type
+```
+winget install ffmpeg
+```
+and then RESTART your terminal (which in some cases probably also
+means computer but well I don't like telling you what to do...
+MAKE UP YOUR OWN MINDS PEOPLE! :-{D)
 
 Tested on Python 3.14 / pygame-ce 2.5+. Window auto-sizes to your
 desktop resolution.
