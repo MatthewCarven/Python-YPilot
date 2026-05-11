@@ -760,10 +760,6 @@ Applies to any fork:
 - **Polish pass** — engine trails, particles, sounds, screen shake.
 - **Landing pads with compression absorption** — buildable that softens
   hard landings.
-- **Persistent universe choice across launches** — currently the
-  rolled seed is held only in-session; a fresh launch always starts on
-  default. A small `last_universe.json` would fix this without touching
-  save-slot semantics.
 
 ### Recently shipped (no longer deferred)
 
