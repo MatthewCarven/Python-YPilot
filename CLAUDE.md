@@ -15,7 +15,7 @@ There is **no test suite, no linter config, and no build step**. The project is 
 
 ## Repository shape
 
-The entire game lives in a single file: `ypilot.py` (~4500 lines). There is no module split, no asset pipeline, no ECS. Every game object is a small class with `update()` / `draw()` methods, and `main()` drives the loop. The codebase deliberately trades modular fanciness for diff-readability.
+The entire game lives in a single file: `ypilot.py` (~5200 lines). There is no module split, no asset pipeline, no ECS. Every game object is a small class with `update()` / `draw()` methods, and `main()` drives the loop. The codebase deliberately trades modular fanciness for diff-readability.
 
 The repo root is **not a git repository**.
 

@@ -108,25 +108,21 @@ relative to orbital direction) and landing carefully.
 
 ```
  1. Cache sim_time on self for _compute_accel
- 2. Decrement takeoff_lock_timer; compute steering_active = (timer ≤ 0)
+ 2. Compute steering_active = not self.landed
  3. Mouse aim — gated by steering_active and mouse_aim_active
  4. Turn keys A/D, Left/Right — gated by steering_active
  5. _read_thrust_input(keys, mods) — sets thrust flags + cancels autopilots
- 6. Takeoff-lock override — if timer > 0:
-       force thrusting=True, retro/strafe=False,
-       thrust_scale=BOOST, brake_assist=False, path_hold=False
- 7. Landed clamp — if landed:
+ 6. Landed clamp — if landed:
        glue pos to surface, set vel=body.vel, lock angle to landed_radial
-       if thrusting/retro: bump pos to launch-pad height,
-                           unlatch, arm takeoff_lock_timer
+       if thrusting/retro: bump pos to launch-pad height, unlatch
        else: refuel + mine + return early
- 8. Zero thrust if fuel == 0
- 9. Compute path-hold accel ONCE (against sim_time - dt to match
+ 7. Zero thrust if fuel == 0
+ 8. Compute path-hold accel ONCE (against sim_time - dt to match
     start-of-step state — see "One-update path-hold accel" below)
-10. Burn calculation (sums forward, retro, strafe, brake-assist,
+ 9. Burn calculation (sums forward, retro, strafe, brake-assist,
     path-hold contributions; consumes fuel)
-11. Leapfrog integration (kick-drift-kick, symplectic)
-12. _check_body_contact — re-land or crash on impact
+10. Leapfrog integration (kick-drift-kick, symplectic)
+11. _check_body_contact — re-land or crash on impact
 ```
 
 ### Why path-hold accel is computed once per update
@@ -303,11 +299,10 @@ silent no-op until ffmpeg is installed.
 | State | Set when | Cleared when |
 |---|---|---|
 | `alive` | reset | hard impact, contact with non-landable body (sun) |
-| `landed` | `_resolve_surface_contact` succeeds | landed-clamp's unlatch (W/S thrust) |
+| `landed` | `_resolve_surface_contact` succeeds | landed-clamp's unlatch (W/S thrust). Also gates `steering_active`: while `landed` is True, mouse aim / turn keys are suppressed (landed clamp also re-snaps `self.angle` to `landed_radial` every frame). The instant `landed` flips False, input re-engages. |
 | `landed_body`, `landed_radial` | at touchdown | unlatch on takeoff |
-| `takeoff_lock_timer > 0` | unlatch on takeoff | per-frame decrement |
-| `brake_assist` | `H` toggle | W/S press, takeoff lock arms, fuel == 0 |
-| `path_hold` | `J` toggle (after a committed plan) | W/S press, takeoff lock arms, fuel == 0, snapshot exhausted |
+| `brake_assist` | `H` toggle | W/S press, fuel == 0 |
+| `path_hold` | `J` toggle (after a committed plan) | W/S press, fuel == 0, snapshot exhausted |
 | `hover_hold` | derived per-frame from Shift while brake_assist on | forward/reverse pressed (avoids modifier conflict) |
 | `brake_assist_scale` | derived per-frame from Ctrl while brake_assist on | forward/reverse pressed |
 
@@ -355,15 +350,48 @@ wrong.
 **Fix:** set `self.angle = self.landed_radial` inside the landed clamp
 every frame, so any aim drift is overwritten while the ship is parked.
 
-### Takeoff sliding tangentially
+### Takeoff sliding tangentially (and the lock that fought the planner)
 
-With nose off-vertical at the moment of liftoff, boost vector wasn't
-radial and the ship would skitter along the surface for a second before
-centrifugal effect spun it free.
+**The original symptom.** With nose off-vertical at the moment of
+liftoff, the boost vector wasn't radial and the ship would skitter
+along the surface for a second before centrifugal effect spun it free.
 
-**Fix:** `takeoff_lock_timer` suppresses mouse-aim, turn keys, and
-strafe for ~0.3 s post-liftoff, and the lock-override forces full boost
-regardless of input — "press W, ship handles the launch."
+**The original fix.** A `takeoff_lock_timer` armed to
+`TAKEOFF_LOCK_SECONDS = 0.30` on unlatch. While positive, it suppressed
+mouse aim / turn keys / strafe and a lock-override block forced
+`thrusting=True` at `THRUST_BOOST_SCALE` regardless of input — "press W,
+ship handles the launch."
+
+**Why that fix was retired.** Two reasons:
+
+1. The landed clamp already re-snaps `self.angle = self.landed_radial`
+   every frame while parked, so at the moment of unlatch the angle is
+   *already* radial. The lock was hand-holding the post-liftoff window,
+   not the takeoff frame itself, and the original "skitter" was rated
+   "annoying but not fatal" — recoverable in ~1 s of centrifugal escape.
+2. The lock fought the planner. A player who committed a plan-mode burn
+   mid-launch would see the orange line under-predict, because the
+   live ship received the planned Δv *plus* free BOOST thrust along
+   `self.angle` for the rest of the lock window.
+
+**The replacement.** State-based steering gating: `steering_active =
+not self.landed`. While landed, mouse aim / turn keys are suppressed
+and the landed clamp snaps `self.angle` radial. The instant the clamp
+unlatches the ship, input re-engages — the player owns the nose from
+the first post-liftoff frame. The `MOUSE_AIM_DEADZONE_SQ` check
+absorbs the common "cursor near ship" case so the skitter doesn't
+materialise unless the cursor is meaningfully off-centre.
+
+**Don't reintroduce a time-based lock.** Any future "training wheels"
+feature should be gated on geometry (still inside the deadzone? still
+within N pixels of the surface?) rather than a clock, so it can't
+conflict with player-initiated burns.
+
+**Companion ergonomics.** Plan-mode entry while landed pre-sets
+`plan_burn_duration = PLAN_MODE_TAKEOFF_DURATION` (1.5 s by default
+— a sensible "real takeoff" Δv). Orange line shows a takeoff
+trajectory the moment Space is pressed from the surface, so single-
+burn launch is Space, aim, Enter.
 
 ### Strafe used to cancel autopilot
 

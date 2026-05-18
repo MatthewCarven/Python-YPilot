@@ -12,7 +12,7 @@ are read each frame, see [PROGRAM_FLOW.md](PROGRAM_FLOW.md).
 
 | Input | Effect |
 |---|---|
-| **Mouse** | Aims the ship's nose at the cursor. Suppressed for ~0.3 s after liftoff (`TAKEOFF_LOCK_SECONDS`) so a fresh launch climbs cleanly upward instead of being yanked sideways by an off-centre cursor. |
+| **Mouse** | Aims the ship's nose at the cursor. Suppressed while landed (the landed clamp re-snaps the nose to surface-radial every frame); re-engages the instant the ship unlatches. Keep the cursor near the ship at takeoff — the mouse-aim deadzone absorbs small offsets, but a cursor that's meaningfully off-centre will start rotating the nose immediately and the first second of climb gets messy. |
 | **A** | Rotate counter-clockwise (keyboard-only fallback; mouse aim usually overrides this every frame in flight). |
 | **D** | Rotate clockwise (keyboard-only fallback). |
 
@@ -48,10 +48,14 @@ The thrust trim ladder uses Shift / Ctrl / Ctrl+Shift as scale modifiers:
 Pressing W (any modifier) cancels brake-assist and path-hold — those are
 "I'm taking control" gestures.
 
-On takeoff from the surface, the ship auto-commits to full-boost forward
-thrust for `TAKEOFF_LOCK_SECONDS` regardless of input. One press of W
-kicks off a clean climb and the launch-assist holds the line until the
-ship is clear.
+Takeoff: the landed clamp keeps the nose snapped to surface-radial, so
+pressing W (or `Shift+W` for boost) launches straight up. The instant
+the ship unlatches, the mouse takes back the nose — keep the cursor
+near the ship for a clean first second of climb. For a planned takeoff
+with an off-radial burn direction, use plan-mode (Space) instead: while
+landed, plan-mode pre-sets the burn duration to
+`PLAN_MODE_TAKEOFF_DURATION` (1.5 s), so Space, aim, Enter delivers a
+takeoff impulse in whatever direction you've aimed.
 
 ## Retro thrust (S / Down)
 

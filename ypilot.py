@@ -15,9 +15,11 @@ Window auto-sizes to the user's desktop resolution. Zoom in/out with +/-.
 
 Controls:
     Mouse              aims the ship's nose at the cursor (primary aim;
-                       suppressed for ~0.30s after liftoff -- the ship
-                       fires full boost vertically during this window
-                       regardless of input, then steering returns to you)
+                       suppressed while landed -- the landed clamp keeps
+                       the nose snapped to surface-radial. Re-engages the
+                       instant the ship unlatches; keep the cursor near
+                       the ship for a clean takeoff or use plan-mode for
+                       off-radial launches)
     A                  rotate counter-clockwise (keyboard fallback;
                        mouse-aim usually overrides this each frame)
     D                  rotate clockwise (keyboard fallback)
@@ -356,10 +358,6 @@ CRITICAL_FUEL_FRAC = 0.05
 LAND_SPEED_MAX = 35.0
 LAND_ANGLE_TOLERANCE = math.radians(30)
 LAND_ALIGN_DOT = math.cos(LAND_ANGLE_TOLERANCE)
-TAKEOFF_LOCK_SECONDS = 0.30      # mouse aim / turn keys are suppressed for
-                                 # this long after liftoff so the ship commits
-                                 # to a clean vertical climb before steering
-                                 # control returns to the player
 LAUNCH_PAD_HEIGHT = 5.0          # extra clearance above the surface at the
                                  # moment of liftoff. The body is frozen
                                  # during ship.update, so the ship's first
@@ -438,6 +436,12 @@ SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 # to pointing the cursor 180° opposite. Lets you A/B forward vs. retro burns
 # from the same aim point (with [ / ] alone) instead of spinning the mouse.
 PLAN_BURN_DURATION_DEFAULT = 0.1
+# Pre-set duration when plan-mode is entered from a landed state. 1.5s of
+# nominal SHIP_THRUST delivers dv = 330 px/s, enough to cleanly escape
+# Planet's surface gravity in a few seconds -- so the orange line shows a
+# real takeoff trajectory out of the box (Space, aim, Enter) without the
+# player first dialling duration up from 0.1s. Tune by feel.
+PLAN_MODE_TAKEOFF_DURATION = 1.5
 PLAN_BURN_DURATION_MAX = 10.0
 PLAN_BURN_DURATION_MIN = -PLAN_BURN_DURATION_MAX  # symmetric: negative = retro
 PLAN_BURN_DURATION_LEAP_STEP = 1.0           # Shift + [ / ]    (1-s leap)
@@ -1640,7 +1644,6 @@ class Ship:
         self.brake_assist_scale = 1.0
         self.brake_assist_target: Body | None = None  # latched on engage
         self.hover_hold = False
-        self.takeoff_lock_timer = 0.0
         self.fuel = MAX_FUEL
         self.ore = 0.0
         self.mining_target = None
@@ -1772,12 +1775,13 @@ class Ship:
         # signature (kept matching the leapfrog's per-half-step contract).
         self._sim_time = sim_time
 
-        # Tick down the post-liftoff steering lock. While > 0, mouse aim and
-        # turn keys are suppressed so a fresh boost climbs cleanly upward
-        # instead of being yanked sideways into the surface by an off-centre
-        # cursor.
-        self.takeoff_lock_timer = max(0.0, self.takeoff_lock_timer - dt)
-        steering_active = self.takeoff_lock_timer <= 0.0
+        # Steering is suppressed while landed so an off-centre cursor can't
+        # tilt the nose off-radial during the parked phase. The landed clamp
+        # below also re-snaps self.angle to landed_radial every frame for the
+        # same reason -- this gate just keeps mouse aim / A / D from spending
+        # the cycles. The instant the clamp unlatches the ship (landed flips
+        # False), input re-engages -- the player owns the nose from there.
+        steering_active = not self.landed
 
         if steering_active and mouse_aim_active and mouse_pos is not None:
             dx = mouse_pos[0] - WIDTH / 2
@@ -1807,20 +1811,6 @@ class Ship:
 
         self._read_thrust_input(keys, mods)
 
-        # Launch assist: while the takeoff lock is active, force full boost
-        # forward regardless of what the player is (or isn't) holding. One
-        # press commits to the climb; the ship handles the rest until it's
-        # clear of the surface. Cancels retro and brake-assist for the same
-        # window so nothing else fights the launch.
-        if self.takeoff_lock_timer > 0.0:
-            self.thrusting = True
-            self.retro_thrusting = False
-            self.strafing_left = False
-            self.strafing_right = False
-            self.thrust_scale = THRUST_BOOST_SCALE
-            self.brake_assist = False
-            self.path_hold = False
-
         if self.landed and self.landed_body is not None:
             self.brake_assist = False
             self.path_hold = False
@@ -1841,11 +1831,17 @@ class Ship:
                 # ship back into the body's static position. Without this,
                 # trailing-side launches re-land every frame until orbital
                 # geometry shifts enough to break the loop.
+                #
+                # No post-liftoff time-lock: steering re-engages the moment
+                # landed flips False. self.angle is already landed_radial
+                # (clamped above) so the FIRST integration step's thrust is
+                # radial. Subsequent frames let mouse aim rotate the nose
+                # toward the cursor -- the deadzone (MOUSE_AIM_DEADZONE_SQ)
+                # absorbs the common "cursor near ship" case.
                 self.pos = body.pos + radial * (body.radius + LAUNCH_PAD_HEIGHT)
                 self.landed = False
                 self.landed_body = None
                 self.mining_target = None
-                self.takeoff_lock_timer = TAKEOFF_LOCK_SECONDS
             else:
                 self.fuel = min(MAX_FUEL, self.fuel + REFUEL_RATE * dt)
                 self._mine(deposits, dt)
@@ -2107,9 +2103,8 @@ class Ship:
         Returns False if the ship is dead or out of fuel. If fuel is short
         of |duration|, delivers a proportionally smaller impulse so the
         burn never costs fuel the ship doesn't have. Unlatches cleanly
-        from the surface if landed, bypassing takeoff_lock_timer -- the
-        player has already chosen the burn direction, the launch-assist
-        would only fight that choice."""
+        from the surface if landed (no post-liftoff time-lock to fight --
+        the player has already chosen the burn direction)."""
         if not self.alive:
             return False
         if self.fuel <= 0.0:
@@ -2130,7 +2125,6 @@ class Ship:
             self.landed = False
             self.landed_body = None
             self.mining_target = None
-            self.takeoff_lock_timer = 0.0  # no lock: player owns direction
 
         self.vel = self.vel + burn_dir * dv_mag
         # Face the actual impulse direction (flips for negative durations).
@@ -2884,10 +2878,22 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
                 f"  ({n_samp} samples)  (cancels on W/S)"
             )
         if ship.landed:
+            # Red while landed: nominal W can't beat surface gravity on any
+            # default-world body, so the player must hold Shift (boost) to
+            # take off. Flagging this on the HUD turns the silent failure
+            # into a visible instruction.
+            landed_red = (255, 90, 90)
             if ship.mining_target is not None:
-                lines.append(f"LANDED  -  refueling + MINING ({MINING_RATE:.0f}/s)")
+                lines.append((
+                    f"LANDED  -  refueling + MINING ({MINING_RATE:.0f}/s)"
+                    f"  -  hold Shift+W to take off",
+                    landed_red,
+                ))
             else:
-                lines.append("LANDED  -  refueling")
+                lines.append((
+                    "LANDED  -  refueling  -  hold Shift+W to take off",
+                    landed_red,
+                ))
         if ship.fuel <= 0.0 and not ship.landed:
             lines.append("OUT OF FUEL")
         if build_prompt:
@@ -2950,7 +2956,13 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
         color = (255, 120, 120)
 
     for i, line in enumerate(lines):
-        surf.blit(font.render(line, True, color), (16, 16 + i * 22))
+        # Each entry is either a plain string (uses the default color) or
+        # a (text, override_color) tuple for per-line emphasis.
+        if isinstance(line, tuple):
+            text, line_color = line
+        else:
+            text, line_color = line, color
+        surf.blit(font.render(text, True, line_color), (16, 16 + i * 22))
 
     if ship.alive:
         bar_y = 16 + len(lines) * 22 + 4
@@ -3393,7 +3405,6 @@ def _ship_to_dict(ship: "Ship", deposits: list[Deposit]) -> dict:
         "landed_body": body_ref(ship.landed_body),
         "landed_radial": ship.landed_radial,
         "mining_target_idx": mt_idx,
-        "takeoff_lock_timer": ship.takeoff_lock_timer,
         "thrust_scale": ship.thrust_scale,
         "retro_scale": ship.retro_scale,
         "brake_assist": ship.brake_assist,
@@ -3444,7 +3455,6 @@ def _ship_apply_dict(ship: "Ship", data: dict,
         ship.mining_target = deposits[mt_idx]
     else:
         ship.mining_target = None
-    ship.takeoff_lock_timer = float(data.get("takeoff_lock_timer", 0.0))
     ship.thrust_scale = float(data.get("thrust_scale", 1.0))
     ship.retro_scale = float(data.get("retro_scale", RETRO_THRUST_SCALE))
     ship.brake_assist = bool(data.get("brake_assist", False))
@@ -4165,6 +4175,14 @@ def main() -> None:
                     paused = not paused
                     if paused:
                         plan_burn_offset = _reset_preview_offset()
+                        # Plan-mode entry while landed: pre-set the preview
+                        # duration to a sensible takeoff impulse. Orange line
+                        # immediately shows where the burn would put the ship,
+                        # so single-burn takeoff is Space, aim, Enter -- no
+                        # need to dial duration up from 0.1s first. Tunable
+                        # via PLAN_MODE_TAKEOFF_DURATION at top of file.
+                        if ship.landed:
+                            plan_burn_duration = PLAN_MODE_TAKEOFF_DURATION
                 elif event.key == pygame.K_n and paused:
                     # Push the current preview onto the chain at whatever
                     # fire-time the user dialled in (plan_burn_offset).

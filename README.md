@@ -149,7 +149,7 @@ rather than packing everything into this README. If you're:
 ## File layout
 
 ```
-ypilot.py            # the entire game (~4500 lines)
+ypilot.py            # the entire game (~5200 lines)
 README.md            # this file
 CLAUDE.md            # AI-collaborator guidance (load-bearing invariants)
 CONTROLS.md          # full keyboard/mouse reference

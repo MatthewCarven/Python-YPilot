@@ -7,7 +7,7 @@ see [TRAJECTORY.md](TRAJECTORY.md).
 
 ## Architecture in one breath
 
-Single-file Python (`ypilot.py`, ~4500 lines) on top of pygame-ce. The
+Single-file Python (`ypilot.py`, ~5200 lines) on top of pygame-ce. The
 sim is a fixed-timestep leapfrog integrator over a hierarchical Keplerian
 solar system; the visible game (mining, building, combat, AA defence,
 missile printers, save/load, random universes) hangs off that. There is
@@ -352,8 +352,8 @@ start-of-step state and reused for both leapfrog half-kicks. Computing
 fresh per half-kick would compare start-of-step ship pos to end-of-step
 plan time — a one-step phase offset the controller would burn fuel
 fighting forever. (See [PROGRAM_FLOW.md § Bug-fix
-history](PROGRAM_FLOW.md#bug-fix-history) for the version of this fight
-that was caught.)
+history](PROGRAM_FLOW.md#bug-fix-history-dont-reintroduce) for the
+version of this fight that was caught.)
 
 ## Plan mode (chained burns)
 
@@ -653,8 +653,8 @@ tweaked by feel:
 
 | Constant | Value | Purpose / rule of thumb |
 |---|---|---|
-| `TAKEOFF_LOCK_SECONDS` | 0.30 | Lock window after liftoff; user-tuned by feel |
 | `LAUNCH_PAD_HEIGHT` | 5.0 | Pre-takeoff radial bump; must exceed `body.vel × dt + safety` |
+| `PLAN_MODE_TAKEOFF_DURATION` | 1.5 | Pre-set plan-mode burn duration on landed entry — Δv = 330 px/s at nominal thrust |
 | `LATERAL_THRUST_SCALE` | 0.1 | Q/E strafe magnitude |
 | `RETRO_THRUST_SCALE` | 0.1 | S retro magnitude (10 %) |
 | `RETRO_PRECISION_SCALE` | 0.01 | Ctrl+S retro (1 %) |
@@ -763,24 +763,27 @@ escape velocity → Hohmann transfer.
 Both forks share the engine (this repo) and add their own quiz overlay
 without touching the simulation.
 
+### Mistakes and feedback
+
+How should the forks react when the player gets something wrong? Tone
+matters here — *punishing* is the opposite of what an educational
+variant should optimise for. One direction: simply state the error and
+let the player retry (calm, low-friction). Another, more playful one:
+a fun in-world malfunction — the next burn comes out slightly off, so
+the student sees their mistake reflected in the simulation without
+feeling penalised. Open to debate. Probably ends up fork-specific (the
+Elementary edition wants the gentler end; the Physics edition can lean
+into "your maths was off by 5 % so your apoapsis is too").
+
 ## Deferred TODO
 
-Applies to any fork:
-
-- **Composable multi-part turrets** — base + barrel + ammo crate, faster
-  aim, longer range. Reuses the eventual ship-builder grid code.
-- **Passive harvest structures** — long-term miners and fuel synthesis
-  (H₂O + ore + sunlight). Adds water as a second resource.
-- **Build-while-hovering** — "unreliable catch arm" with rubber-seal
-  failure flavour. Adds engineering grit.
-- **Recursive build pads** — let the player construct their own pads.
-- **Multiplayer sync** — v2.0, big project.
-- **Player / planet HP and combat consequences** — currently enemy
-  and AA-bullet contact are instant death. Add hit points and
-  repair-with-ore.
-- **Polish pass** — engine trails, particles, sounds, screen shake.
-- **Landing pads with compression absorption** — buildable that softens
-  hard landings.
+Currently empty — see "Educational forks (planned)" above for the
+active direction. The previous list of generic feature ideas
+(composable turrets, passive harvest structures, build-while-hovering,
+recursive build pads, multiplayer sync, player/planet HP, polish
+pass, landing pads with compression absorption) was retired
+2026-05-17 when project scope narrowed; we'll burn those bridges when
+a specific fork actually wants them.
 
 ### Recently shipped (no longer deferred)
 
