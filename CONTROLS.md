@@ -48,14 +48,15 @@ The thrust trim ladder uses Shift / Ctrl / Ctrl+Shift as scale modifiers:
 Pressing W (any modifier) cancels brake-assist and path-hold — those are
 "I'm taking control" gestures.
 
-Takeoff: the landed clamp keeps the nose snapped to surface-radial, so
-pressing W (or `Shift+W` for boost) launches straight up. The instant
-the ship unlatches, the mouse takes back the nose — keep the cursor
-near the ship for a clean first second of climb. For a planned takeoff
-with an off-radial burn direction, use plan-mode (Space) instead: while
-landed, plan-mode pre-sets the burn duration to
-`PLAN_MODE_TAKEOFF_DURATION` (1.5 s), so Space, aim, Enter delivers a
-takeoff impulse in whatever direction you've aimed.
+Takeoff: nominal `SHIP_THRUST` is weaker than surface gravity on every
+landable body in the default world (494 px/s² at Planet vs 220 px/s²
+nominal), so plain W just pops the ship 5 px on the launch-pad bump
+and lets gravity reel it back in. **Hold `Shift+W` to take off** — the
+5× boost is enough to climb clear of the gravity well before nominal
+physics would matter. The landed clamp keeps the nose snapped to
+surface-radial while parked, so the boost vector is automatically
+radial at the moment of liftoff. The HUD's LANDED line glows red as a
+reminder.
 
 ## Retro thrust (S / Down)
 

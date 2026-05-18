@@ -436,12 +436,6 @@ SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 # to pointing the cursor 180° opposite. Lets you A/B forward vs. retro burns
 # from the same aim point (with [ / ] alone) instead of spinning the mouse.
 PLAN_BURN_DURATION_DEFAULT = 0.1
-# Pre-set duration when plan-mode is entered from a landed state. 1.5s of
-# nominal SHIP_THRUST delivers dv = 330 px/s, enough to cleanly escape
-# Planet's surface gravity in a few seconds -- so the orange line shows a
-# real takeoff trajectory out of the box (Space, aim, Enter) without the
-# player first dialling duration up from 0.1s. Tune by feel.
-PLAN_MODE_TAKEOFF_DURATION = 1.5
 PLAN_BURN_DURATION_MAX = 10.0
 PLAN_BURN_DURATION_MIN = -PLAN_BURN_DURATION_MAX  # symmetric: negative = retro
 PLAN_BURN_DURATION_LEAP_STEP = 1.0           # Shift + [ / ]    (1-s leap)
@@ -4175,14 +4169,6 @@ def main() -> None:
                     paused = not paused
                     if paused:
                         plan_burn_offset = _reset_preview_offset()
-                        # Plan-mode entry while landed: pre-set the preview
-                        # duration to a sensible takeoff impulse. Orange line
-                        # immediately shows where the burn would put the ship,
-                        # so single-burn takeoff is Space, aim, Enter -- no
-                        # need to dial duration up from 0.1s first. Tunable
-                        # via PLAN_MODE_TAKEOFF_DURATION at top of file.
-                        if ship.landed:
-                            plan_burn_duration = PLAN_MODE_TAKEOFF_DURATION
                 elif event.key == pygame.K_n and paused:
                     # Push the current preview onto the chain at whatever
                     # fire-time the user dialled in (plan_burn_offset).

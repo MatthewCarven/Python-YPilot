@@ -654,7 +654,6 @@ tweaked by feel:
 | Constant | Value | Purpose / rule of thumb |
 |---|---|---|
 | `LAUNCH_PAD_HEIGHT` | 5.0 | Pre-takeoff radial bump; must exceed `body.vel × dt + safety` |
-| `PLAN_MODE_TAKEOFF_DURATION` | 1.5 | Pre-set plan-mode burn duration on landed entry — Δv = 330 px/s at nominal thrust |
 | `LATERAL_THRUST_SCALE` | 0.1 | Q/E strafe magnitude |
 | `RETRO_THRUST_SCALE` | 0.1 | S retro magnitude (10 %) |
 | `RETRO_PRECISION_SCALE` | 0.01 | Ctrl+S retro (1 %) |

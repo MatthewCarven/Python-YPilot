@@ -387,11 +387,13 @@ feature should be gated on geometry (still inside the deadzone? still
 within N pixels of the surface?) rather than a clock, so it can't
 conflict with player-initiated burns.
 
-**Companion ergonomics.** Plan-mode entry while landed pre-sets
-`plan_burn_duration = PLAN_MODE_TAKEOFF_DURATION` (1.5 s by default
-— a sensible "real takeoff" Δv). Orange line shows a takeoff
-trajectory the moment Space is pressed from the surface, so single-
-burn launch is Space, aim, Enter.
+**The new takeoff workflow.** Nominal `SHIP_THRUST` (220 px/s²) is
+weaker than surface gravity on every landable body (Planet 494,
+Ember 496, Frostbite 391, Moon 320 px/s²), so plain W can't escape —
+the player has to hold `Shift+W` for the 5× boost. This used to be
+hidden by the lock-override silently forcing `THRUST_BOOST_SCALE`
+during the lock window; now the requirement is explicit. The LANDED
+line on the HUD renders in red as a reminder to hold Shift.
 
 ### Strafe used to cancel autopilot
 
