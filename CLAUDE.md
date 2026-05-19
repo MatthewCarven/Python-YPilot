@@ -17,7 +17,12 @@ There is **no test suite, no linter config, and no build step**. The project is 
 
 The entire game lives in a single file: `ypilot.py` (~5200 lines). There is no module split, no asset pipeline, no ECS. Every game object is a small class with `update()` / `draw()` methods, and `main()` drives the loop. The codebase deliberately trades modular fanciness for diff-readability.
 
-The repo root is **not a git repository**.
+The repo root **is a git repository** with a remote at
+`https://github.com/MatthewCarven/Python-YPilot`. The `.git` folder is
+hidden by default on Windows, which has fooled earlier readers of this
+doc -- if `ls` doesn't show it, try `ls -la` or unhide hidden folders.
+Commit history is a reliable source of truth for *what* changed and
+*why*; commit messages are kept descriptive on purpose (see `git log`).
 
 ## Existing documentation — read these before non-trivial work
 

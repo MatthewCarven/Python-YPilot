@@ -132,6 +132,18 @@ point; only the count itself diverges.
   provisional `e_next = 0` first, then refines knowing the actual
   neighbours. For e ≤ 0.3 it converges after one pass; the second is
   belt-and-braces.
+- **Surface gravity ≤ `MAX_LANDABLE_SURFACE_GRAVITY` (= 0.6 ×
+  `BRAKE_MAX_ACCEL` ≈ 660)** on every random planet and moon. The
+  `(mu, radius)` joint roll is constrained so that no body ends up with
+  `mu/r² > cap`: planets clamp the `mu` upper bound given rolled radius,
+  and moons additionally bump radius up when a heavy parent + small
+  moon would breach cap at min `mu`-fraction. Leaving ~40 % of the
+  brake-assist budget free above gravity cancellation guarantees
+  enough headroom to also damp approach velocity, so every visible
+  random planet really is landable. (To fork in gas-giant hazards,
+  raise this cap or set it to `math.inf`; nothing else in the
+  generator needs changing — the single knob lives next to
+  `BRAKE_MAX_ACCEL` in `ypilot.py`.)
 - **Color palette** indexed by orbit position (hot red innermost →
   icy white-blue outermost). Names are `P1..P6` / `P{i}M{j}` so
   save-file `body_ref` lookups stay stable per seed.
@@ -317,12 +329,21 @@ corrective acceleration. Behaviour:
   control. Stacks with hover-hold.
 - **Fallback** — if no landable body exists, zero absolute velocity.
 
-Output is clamped at `BRAKE_MAX_ACCEL = 3 × SHIP_THRUST = 660 px/s²` so
-brake-assist can't deliver more thrust than the engines could.
+Output is clamped at `BRAKE_MAX_ACCEL = 5 × SHIP_THRUST = 1100 px/s²` —
+matching the `THRUST_BOOST_SCALE = 5` Shift+W boost ceiling, so
+brake-assist can deliver everything the engines could under manual full-
+boost flight but no more. Earlier this was `3 × SHIP_THRUST`; the bump
+was a response to needing more headroom on heavy bodies, paired with
+the random-universe surface-gravity cap (`MAX_LANDABLE_SURFACE_GRAVITY`,
+documented under [Random universes § Layout](#layout) and in the
+[Tunable constants](#tunable-constants) table).
 
-The PD controller has `BRAKE_KP = 2.0` and uses gravity feed-forward
+The PD controller has `BRAKE_KP = 4.0` and uses gravity feed-forward
 (`-BRAKE_KP × vel_to_kill - gravity`) so it doesn't fight gravity while
-holding station.
+holding station. Higher `BRAKE_KP` means deceleration starts earlier
+and is more aggressive per unit of velocity error; raising it further
+risks hunting near zero relative velocity, so 4.0 sits at the upper end
+of "stable without visible oscillation".
 
 ## Path-hold autopilot
 
@@ -661,8 +682,9 @@ tweaked by feel:
 | `THRUST_BOOST_SCALE` | 5.0 | Shift+W boost |
 | `THRUST_PRECISION_SCALE` | 0.01 | Ctrl+W precision (1 %) |
 | `THRUST_FINE_SCALE` | 0.001 | Ctrl+Shift+W extra-fine (0.1 %) |
-| `BRAKE_KP` | 2.0 | Brake-assist PD gain |
-| `BRAKE_MAX_ACCEL` | 660 | Brake-assist output cap (= 3 × `SHIP_THRUST`) |
+| `BRAKE_KP` | 4.0 | Brake-assist PD gain |
+| `BRAKE_MAX_ACCEL` | 1100 | Brake-assist output cap (= 5 × `SHIP_THRUST`, matches Shift+W boost ceiling) |
+| `MAX_LANDABLE_SURFACE_GRAVITY` | 660 | Surface-gravity cap (= 0.6 × `BRAKE_MAX_ACCEL`) enforced on `make_random_solar_system` planet+moon rolls; default world is unaffected. Raise (e.g. ×1.5) or set to `math.inf` to fork in unlandable gas giants. |
 | `PATH_HOLD_KP` | 2.0 | Path-hold proportional gain |
 | `PATH_HOLD_KD` | 3.0 | Path-hold derivative gain |
 | `PATH_HOLD_MAX_ACCEL` | 11 | Path-hold output cap (= 0.05 × `SHIP_THRUST`) |

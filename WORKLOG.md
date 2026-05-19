@@ -22,3 +22,16 @@
   escape hatch for a "gas-giants" fork: raise the constant or set it to
   `math.inf` to disable the check; nothing else in the generator needs
   changing. Monte-Carlo verified 0/20000 rolls exceed cap.
+- **Updated DESIGN.md** to reflect the brake-assist tunes and the new
+  landability cap: rewrote the brake-assist clamp paragraph (the old
+  "can't deliver more thrust than the engines could" justification no
+  longer holds at 5× — reframed as "matches Shift+W boost ceiling"),
+  refreshed the Tunable constants table (`BRAKE_KP`, `BRAKE_MAX_ACCEL`,
+  new `MAX_LANDABLE_SURFACE_GRAVITY` row), and added a Random
+  universes § Layout bullet documenting the (mu, radius) constraint
+  alongside the existing eccentricity and shell-spacing rules.
+- **Fixed CLAUDE.md** -- it said "the repo root is not a git repository",
+  which is wrong (it is, with a remote at MatthewCarven/Python-YPilot).
+  The .git folder being hidden by Windows default is what fooled the
+  doc's author. Noted the `ls -la` workaround and that commit history
+  is a primary source of truth.
