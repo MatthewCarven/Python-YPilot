@@ -367,9 +367,21 @@ LAUNCH_PAD_HEIGHT = 5.0          # extra clearance above the surface at the
                                  # 5 px gives us comfortable headroom.
 
 # --- Brake assist -----------------------------------------------------------
-BRAKE_KP = 2.0
-BRAKE_MAX_ACCEL = SHIP_THRUST * 3.0
+BRAKE_KP = 4.0
+BRAKE_MAX_ACCEL = SHIP_THRUST * 5.0
 BRAKE_RING_COLOR = (90, 200, 255)
+
+# Surface-gravity ceiling enforced on random universes so brake-assist always
+# has enough headroom above gravity cancellation to also damp approach
+# velocity. 0.6 of BRAKE_MAX_ACCEL keeps ~40% of the thrust budget free for
+# velocity-kill. Default-world bodies all sit below this (~494 max), and the
+# random generator (make_random_solar_system) constrains (mu, radius) rolls
+# so no random body exceeds it either.
+#
+# To fork for gas giants: raise this (e.g. * 1.5 to let gravity exceed the
+# brake-assist ceiling outright) or set it to math.inf to disable the check.
+# Nothing else in the generator needs changing -- this is the single knob.
+MAX_LANDABLE_SURFACE_GRAVITY = BRAKE_MAX_ACCEL * 0.6
 
 # --- Path-hold autopilot ---------------------------------------------------
 # Tracks the most-recently-committed plan-mode trajectory. At commit time the
@@ -877,11 +889,23 @@ def make_random_solar_system(seed: int,
     planets: list[Body] = []
     for i in range(n_planets):
         col, rim = RANDOM_PALETTE[min(i, len(RANDOM_PALETTE) - 1)]
+        # Roll radius first, then clamp mu's upper bound so that
+        # surface gravity (mu / r^2) stays under MAX_LANDABLE_SURFACE_GRAVITY.
+        # Cuts off the high-mu / low-radius corner of the joint distribution
+        # that would otherwise produce planets brake-assist can't land on.
+        # RANDOM_PLANET_RADIUS_MIN=40 with MU_MIN=1e6 gives g~625, so the
+        # smallest planet already sits under the 660 cap -- the clamp only
+        # bites for radii small enough that the original MU_MAX would
+        # overshoot. No re-rolling needed.
+        radius = rng.uniform(RANDOM_PLANET_RADIUS_MIN,
+                             RANDOM_PLANET_RADIUS_MAX)
+        mu_upper = min(RANDOM_PLANET_MU_MAX,
+                       MAX_LANDABLE_SURFACE_GRAVITY * radius * radius)
+        mu_upper = max(mu_upper, RANDOM_PLANET_MU_MIN)
         planet = Body(
             f"P{i + 1}",
-            radius=rng.uniform(RANDOM_PLANET_RADIUS_MIN,
-                               RANDOM_PLANET_RADIUS_MAX),
-            mu=rng.uniform(RANDOM_PLANET_MU_MIN, RANDOM_PLANET_MU_MAX),
+            radius=radius,
+            mu=rng.uniform(RANDOM_PLANET_MU_MIN, mu_upper),
             color=col, rim=rim,
             parent=sun, orbit_radius=semi_major[i],
             phase=rng.uniform(0.0, 2.0 * math.pi),
@@ -915,12 +939,29 @@ def make_random_solar_system(seed: int,
                 break  # ran out of stable space
             e_max_moon = max(0.0, min(RANDOM_MAX_E,
                                       (zone_max - moon_a) / moon_a))
+            # Roll moon radius first; bump it up if even the minimum mu
+            # fraction would exceed MAX_LANDABLE_SURFACE_GRAVITY for this
+            # parent planet. (Without the bump, a 15-radius moon around an
+            # 8e6-mu planet hits g~711 at min-frac -- unlandable.) Then
+            # clamp the mu-frac upper bound to keep the actual roll under
+            # cap. Same single-knob escape hatch as planets: raise
+            # MAX_LANDABLE_SURFACE_GRAVITY to allow rocky-mini-moon hazards.
+            moon_radius = rng.uniform(RANDOM_MOON_RADIUS_MIN,
+                                      RANDOM_MOON_RADIUS_MAX)
+            r2_min_landable = (planet.mu * RANDOM_MOON_MU_FRAC_MIN
+                               / MAX_LANDABLE_SURFACE_GRAVITY)
+            if moon_radius * moon_radius < r2_min_landable:
+                moon_radius = min(math.sqrt(r2_min_landable),
+                                  RANDOM_MOON_RADIUS_MAX)
+            frac_upper = min(RANDOM_MOON_MU_FRAC_MAX,
+                             (MAX_LANDABLE_SURFACE_GRAVITY
+                              * moon_radius * moon_radius / planet.mu))
+            frac_upper = max(frac_upper, RANDOM_MOON_MU_FRAC_MIN)
             moon = Body(
                 f"P{i + 1}M{j + 1}",
-                radius=rng.uniform(RANDOM_MOON_RADIUS_MIN,
-                                   RANDOM_MOON_RADIUS_MAX),
+                radius=moon_radius,
                 mu=planet.mu * rng.uniform(RANDOM_MOON_MU_FRAC_MIN,
-                                           RANDOM_MOON_MU_FRAC_MAX),
+                                           frac_upper),
                 color=(180, 175, 170), rim=(120, 115, 110),
                 parent=planet, orbit_radius=moon_a,
                 phase=rng.uniform(0.0, 2.0 * math.pi),
