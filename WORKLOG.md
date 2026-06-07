@@ -1,5 +1,34 @@
 # Worklog
 
+## 2026-06-07
+
+- **`BRAKE_KP = 4.0` verdict: keeping it.** Matthew reports no
+  overshoot/oscillation near zero relative velocity after ~3 weeks of
+  play since the 2026-05-19 bump. The "back off to ~3.0 if it hunts"
+  watch-item is closed.
+- **Added `.gitattributes` (`* text=auto`, `*.bat eol=crlf`, binary
+  rules) and committed as `5de7c40`.** Fixes the phantom whole-file
+  diffs (CRLF worktree vs LF-in-repo with nothing bridging them) that
+  appeared after the Jun 5 exe rebuild. Renormalize staged zero files --
+  repo blobs were already LF -- so this is purely a compare-filter fix,
+  no content rewrite.
+- **Sandbox/git landmine discovered (future Claude sessions, read
+  this):** the Cowork sandbox mounts this folder with delete-protection
+  -- `unlink` fails with EPERM and, worse, **rename-over-an-existing-file
+  zero-fills the target**. Any porcelain index write (`git add`,
+  `git commit`) renames over `.git/index` and corrupts it
+  ("bad signature 0x00000000"). Recovery + working pattern:
+  1. Request file-delete permission (`allow_cowork_file_delete`) FIRST.
+  2. `rm .git/index .git/index.lock` then `git reset` -- rebuilding
+     works because rename-to-a-NEW-path is fine.
+  3. Commit via plumbing with a temp index outside the mount:
+     `GIT_INDEX_FILE=/tmp/idx git read-tree HEAD` -> `git add` ->
+     `git write-tree` -> `git commit-tree` -> `rm .git/refs/heads/main`
+     -> `git update-ref refs/heads/main <new>` -> `rm .git/index` ->
+     `git reset`. Every `.git` write is then create-new, never
+     rename-over.
+  Or just hand the commit commands to Matthew to run natively.
+
 ## 2026-05-19
 
 - **Bumped `BRAKE_MAX_ACCEL` from `SHIP_THRUST * 3.0` → `SHIP_THRUST * 5.0`** (line 371).
