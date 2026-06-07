@@ -1,0 +1,13 @@
+# Line-ending policy: git stores text files as LF internally and compares
+# through this filter, so CRLF<->LF flips (editors, PyInstaller rewriting
+# the spec, etc.) can never show up as phantom whole-file diffs again.
+* text=auto
+
+# Batch files are safest checked out with CRLF (old cmd.exe quirks)
+*.bat text eol=crlf
+
+# Binaries -- never normalize
+*.ico binary
+*.exe binary
+*.png binary
+*.mp4 binary
