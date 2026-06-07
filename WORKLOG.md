@@ -1,5 +1,43 @@
 # Worklog
 
+## 2026-06-08
+
+- **Shipped step 1 of the gameplay-elements arc: scrap economy +
+  missile rebalance** (planned with Matthew 2026-06-07; his pitch:
+  "shot craft drop materials that fall back onto the surface as
+  scrap"). Kills no longer credit `ENEMY_KILL_REWARD = 6` instantly --
+  constant retired. Destroyed UFOs shed a `Debris` chunk (ballistic,
+  same leapfrog + `gravity_at_t` as missiles) that lands as a minable
+  scrap pile (`SCRAP_VALUE = 12`); terrain-crash kills pile up directly
+  at the impact point; missile-killed AA batteries collapse into a
+  `SCRAP_VALUE_BATTERY = 40` pile at their mount. Piles merge within
+  `SCRAP_MERGE_DIST = 14` arc-px, cap at `SCRAP_MAX_PILES = 30`,
+  vanish when emptied; save/load round-trips piles + in-flight chunks.
+  Missiles: `MISSILE_PRINTER_COST` 150 -> 100, `MISSILE_ORE_COST`
+  30 -> 10 (was -24 ore net per kill vs the +6 credit = never built;
+  now ~break-even per kill if salvaged, profitable on blast
+  multi-kills). HUD says SALVAGING over scrap. DESIGN.md (new "Scrap
+  economy" section + tunables table), CONTROLS.md build-menu row, and
+  TASKS.md (arc status) updated.
+- **Verified headless only** (no display in the Cowork session):
+  py_compile + AST, then a runtime suite against the staged module --
+  enemy terrain-crash -> pile, debris fall -> land -> merge, pile cap
+  with smallest-culled, ship salvage via `_mine`, save/load round-trip
+  incl. falling debris. **Not playtested.** Feel-tuning knobs flagged
+  in TASKS.md.
+- **Sandbox landmine #2: stale attribute cache (and a truncated blob
+  in history).** After Windows-side edits (Claude's file tools), bash's
+  mount view keeps the OLD byte size -- reads truncate at it, and `git
+  add` commits truncated blobs. Yesterday's `74037da` worklog commit
+  was exactly that: blob cut at the stale 2302-byte size (fixed today
+  by amending the tip with the correct blob before stacking this
+  session's commit). ypilot.py edits were verified around the bug by
+  staging a fresh-inode copy and diffing against `git show
+  HEAD:ypilot.py` -- which also caught a one-word transcription error.
+  Safe patterns now documented in CLAUDE.md ("Cowork sandbox
+  landmines"); doc edits this session were done bash-side
+  (temp + rm + mv = fresh inode) to keep bash authoritative.
+
 ## 2026-06-07
 
 - **`BRAKE_KP = 4.0` verdict: keeping it.** Matthew reports no

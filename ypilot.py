@@ -58,11 +58,15 @@ Controls:
                        No-op if no plan committed yet, or if landed.
     B (hold)           build mode while landed near an unoccupied build pad.
                        Two options: "Dumb Turret" (50 ore, anti-UFO) and
-                       "Missile Printer" (150 ore, anti-AA + anti-UFO).
-                       Printers cost 30 ore per launch and auto-fire at
+                       "Missile Printer" (100 ore, anti-AA + anti-UFO).
+                       Printers cost 10 ore per launch and auto-fire at
                        the nearest hostile within 5000 units. Each missile
                        gets its own bespoke flight plan (orange trail) and
-                       flies it under gravity.
+                       flies it under gravity. Destroyed hostiles shed
+                       wreckage that falls to the nearest surface as a
+                       scrap pile -- land beside it and the mining beam
+                       salvages it like ore. That salvage IS the kill
+                       reward; nothing is credited at the moment of kill.
     + / =              zoom in (sets the persistent "resting" zoom)
     - / _              zoom out (sets the persistent "resting" zoom)
     0                  reset zoom to 1.0
@@ -527,11 +531,16 @@ BULLET_COLOR = (255, 230, 130)
 # fires guided missiles at the nearest hostile (AA battery > UFO). Each shot
 # costs ore at fire-time so the structure remains a sustained drain on the
 # economy, not a fire-and-forget weapon.
-MISSILE_PRINTER_COST       = 150.0
+# 2026-06-07 economy rebalance: 150/30 -> 100/10. At 30/shot a UFO kill ran
+# -24 ore net vs the old +6 instant reward -- strictly dominated by free
+# turret bullets, so printers never got built. At 10/shot vs SCRAP_VALUE=12
+# salvage, a missile kill is roughly break-even IF you collect the wreck,
+# and profitable on multi-kills within one blast radius.
+MISSILE_PRINTER_COST       = 100.0
 MISSILE_PRINTER_RANGE      = 5000.0
 MISSILE_PRINTER_COOLDOWN   = 8.0
 MISSILE_PRINTER_SCAN_INT   = 0.5
-MISSILE_ORE_COST           = 30.0
+MISSILE_ORE_COST           = 10.0
 MISSILE_PRINTER_BODY       = 11.0
 MISSILE_PRINTER_BARREL_LEN = 18.0
 MISSILE_PRINTER_COLOR      = (200, 130, 60)
@@ -551,6 +560,31 @@ MISSILE_PLAN_HORIZON       = 12.0    # seconds to predict at launch
 MISSILE_PLAN_SOLVE_ITERS   = 5       # intercept-solver iteration cap
 MISSILE_COLOR              = (255, 200, 100)
 MISSILE_PLAN_COLOR         = (160, 110, 40)
+
+# --- Scrap / wreckage -------------------------------------------------------
+# Destroyed hostiles no longer credit ore instantly: they shed a debris
+# chunk that falls ballistically (gravity only, same leapfrog + gravity_at_t
+# sampling as Missile) and, on touching a landable surface, becomes a scrap
+# pile. Land beside it and the mining beam salvages it like an ore deposit
+# (scrap piles vanish when emptied instead of leaving a depleted husk).
+# The kill reward is therefore SCRAP_VALUE *if you go get it* -- worth 2x
+# the retired instant +6 (ENEMY_KILL_REWARD) to price in the trip. UFOs
+# that crash into terrain also leave scrap at the impact point; debris that
+# hits a non-landable body (the sun) vaporises. Piles within
+# SCRAP_MERGE_DIST arc-distance of each other merge, so fortress kill-zones
+# accumulate fat salvage piles instead of litter.
+SCRAP_VALUE            = 12.0
+SCRAP_VALUE_BATTERY    = 40.0   # AA battery wreck: big, rare, worth a trip
+SCRAP_INHERIT_VEL      = 0.4    # fraction of victim velocity kept by debris
+SCRAP_SCATTER_SPEED    = 25.0   # random kick on top of inherited velocity
+SCRAP_DEBRIS_LIFETIME  = 90.0   # cull debris that never lands (deep-space kills)
+SCRAP_DEBRIS_RADIUS    = 2.5
+SCRAP_MERGE_DIST       = 14.0   # arc px within which piles merge
+SCRAP_MAX_PILES        = 30     # hard cap; smallest pile culled first
+SCRAP_PILE_VISUAL      = 5.0    # squatter than DEPOSIT_VISUAL: heap, not spike
+SCRAP_COLOR            = (150, 160, 175)
+SCRAP_RIM              = (90, 100, 115)
+SCRAP_DEBRIS_COLOR     = (190, 195, 205)
 
 # --- Planetary AA battery --------------------------------------------------
 # Stationary, body-mounted defenders rolled per-world. Telegraph their shot
@@ -578,7 +612,8 @@ ENEMY_SPEED = 32.0
 ENEMY_HP = 1
 ENEMY_SPAWN_INTERVAL = 9.0
 ENEMY_SPAWN_DISTANCE = 1700.0
-ENEMY_KILL_REWARD = 6.0
+# ENEMY_KILL_REWARD retired 2026-06-07 -- kills now drop wreckage worth
+# SCRAP_VALUE that must be salvaged from the surface (see Scrap block).
 ENEMY_COLOR = (220, 90, 130)
 ENEMY_RIM = (120, 30, 70)
 ENEMY_COURSE_CORRECT_MEAN = 60.0
@@ -1146,11 +1181,16 @@ def find_soi_crossings(points: list[Vector2], t_start: float, dt: float,
 # ============================================================================
 
 class Deposit:
-    def __init__(self, body: Body, angle: float, quantity: float = DEPOSIT_QTY):
+    def __init__(self, body: Body, angle: float, quantity: float = DEPOSIT_QTY,
+                 is_scrap: bool = False):
         self.body = body
         self.angle = angle
         self.quantity = quantity
         self.max_quantity = quantity
+        # Scrap piles are Deposits with different cosmetics + lifecycle:
+        # they grow when fresh wreckage merges in, and main() culls them
+        # once depleted (ore deposits persist as depleted husks).
+        self.is_scrap = is_scrap
 
     @property
     def pos(self) -> Vector2:
@@ -1203,6 +1243,79 @@ class Bullet:
             self.alive = False
 
 
+class Debris:
+    """Wreckage chunk shed by a destroyed UFO. Ballistic -- gravity only,
+    no thrust, no collision with the ship or projectiles. Integrates with
+    the same leapfrog + gravity_at_t sampling as Missile so it falls
+    consistently through a moving system. On contact with a landable body
+    it reports the impact so main() can convert it into a scrap pile; on
+    contact with a non-landable body (the sun) it just vaporises.
+    """
+
+    def __init__(self, pos: Vector2, vel: Vector2, value: float):
+        self.pos = Vector2(pos)
+        self.vel = Vector2(vel)
+        self.value = value
+        self.lifetime = SCRAP_DEBRIS_LIFETIME
+        self.alive = True
+        # Render-only tumble.
+        self.angle = random.uniform(0.0, 2.0 * math.pi)
+        self.spin = random.uniform(-3.0, 3.0)
+
+    def update(self, dt: float, sim_time: float,
+               bodies: list["Body"]) -> tuple["Body", float] | None:
+        """Returns (body, impact_angle) when it lands this step, else None."""
+        if not self.alive:
+            return None
+        t2 = sim_time + dt
+        a0 = gravity_at_t(self.pos, t2, bodies)
+        v_half = self.vel + a0 * (dt * 0.5)
+        self.pos = self.pos + v_half * dt
+        a1 = gravity_at_t(self.pos, t2, bodies)
+        self.vel = v_half + a1 * (dt * 0.5)
+        self.angle += self.spin * dt
+
+        for body in bodies:
+            d = self.pos - body.pos
+            if d.length() <= body.radius + SCRAP_DEBRIS_RADIUS:
+                self.alive = False
+                if body.landable:
+                    return body, math.atan2(d.y, d.x)
+                return None
+
+        self.lifetime -= dt
+        if self.lifetime <= 0.0:
+            self.alive = False
+        return None
+
+
+def spawn_debris(pos: Vector2, vel: Vector2, value: float) -> Debris:
+    """One wreckage chunk at a kill site: inherits a fraction of the
+    victim's velocity plus a random scatter kick."""
+    kick_a = random.uniform(0.0, 2.0 * math.pi)
+    kick = Vector2(math.cos(kick_a), math.sin(kick_a)) \
+        * random.uniform(0.3, 1.0) * SCRAP_SCATTER_SPEED
+    return Debris(pos, vel * SCRAP_INHERIT_VEL + kick, value)
+
+
+def deposit_scrap(scrap: list[Deposit], body: "Body", angle: float,
+                  value: float) -> None:
+    """Land `value` ore worth of wreckage on `body` at `angle`. Merges
+    into an existing pile within SCRAP_MERGE_DIST arc-distance (fortress
+    kill-zones accumulate instead of littering), else starts a new pile,
+    culling the smallest if over SCRAP_MAX_PILES."""
+    for s in scrap:
+        if s.body is body:
+            arc = abs(shortest_angle_diff(angle, s.angle)) * body.radius
+            if arc <= SCRAP_MERGE_DIST:
+                s.quantity += value
+                s.max_quantity = max(s.max_quantity, s.quantity)
+                return
+    scrap.append(Deposit(body, angle, quantity=value, is_scrap=True))
+    if len(scrap) > SCRAP_MAX_PILES:
+        scrap.remove(min(scrap, key=lambda s: s.quantity))
+
+
 class Enemy:
     def __init__(self, pos: Vector2, vel: Vector2):
         self.pos = Vector2(pos)
@@ -1218,7 +1331,13 @@ class Enemy:
             ENEMY_COURSE_CORRECT_MEAN * (1.0 + ENEMY_COURSE_CORRECT_RAND),
         )
 
-    def update(self, dt: float, bodies: list[Body], ship_pos: Vector2 | None = None) -> None:
+    def update(self, dt: float, bodies: list[Body],
+               ship_pos: Vector2 | None = None
+               ) -> tuple[Body, float] | None:
+        """Returns (body, impact_angle) if the UFO crashed into landable
+        terrain this step -- main() turns that into a scrap pile at the
+        impact point (the wreck is already on the surface, no debris
+        flight needed). None otherwise."""
         self.pos += self.vel * dt
 
         if ship_pos is not None:
@@ -1230,9 +1349,13 @@ class Enemy:
                 self.course_correct_timer = self._roll_correct_interval()
 
         for b in bodies:
-            if (self.pos - b.pos).length() <= b.radius + ENEMY_RADIUS:
+            d = self.pos - b.pos
+            if d.length() <= b.radius + ENEMY_RADIUS:
                 self.alive = False
-                break
+                if b.landable:
+                    return b, math.atan2(d.y, d.x)
+                return None
+        return None
 
 
 def spawn_enemy(target_body: Body) -> Enemy:
@@ -2401,9 +2524,11 @@ def draw_deposit(surf: pygame.Surface, camera: Camera, dep: Deposit) -> None:
     body = dep.body
     radial = Vector2(math.cos(dep.angle), math.sin(dep.angle))
     tangent = Vector2(-radial.y, radial.x)
+    # Scrap piles: squat grey heaps (wider than tall); ore: amber spikes.
+    visual = SCRAP_PILE_VISUAL if dep.is_scrap else DEPOSIT_VISUAL
     base = body.pos + radial * body.radius
-    tip = body.pos + radial * (body.radius + DEPOSIT_VISUAL)
-    half_base = DEPOSIT_VISUAL * 0.6
+    tip = body.pos + radial * (body.radius + visual)
+    half_base = visual * (1.1 if dep.is_scrap else 0.6)
 
     p_left = base - tangent * half_base
     p_right = base + tangent * half_base
@@ -2413,12 +2538,16 @@ def draw_deposit(surf: pygame.Surface, camera: Camera, dep: Deposit) -> None:
         camera.world_to_screen(tip),
         camera.world_to_screen(p_right),
     ]
-    fill = DEPOSIT_DEPLETED_COLOR if dep.depleted else DEPOSIT_COLOR
+    if dep.is_scrap:
+        fill, rim = SCRAP_COLOR, SCRAP_RIM
+    else:
+        fill = DEPOSIT_DEPLETED_COLOR if dep.depleted else DEPOSIT_COLOR
+        rim = DEPOSIT_RIM
     pygame.draw.polygon(surf, fill, pts)
-    pygame.draw.polygon(surf, DEPOSIT_RIM, pts, 1)
+    pygame.draw.polygon(surf, rim, pts, 1)
 
     if dep.quantity < dep.max_quantity:
-        bar_w = max(2, int(DEPOSIT_VISUAL * 2 * camera.zoom))
+        bar_w = max(2, int(visual * 2 * camera.zoom))
         bar_h = 2
         tip_sx, tip_sy = camera.world_to_screen(tip)
         bx = tip_sx - bar_w / 2
@@ -2548,6 +2677,17 @@ def draw_bullet(surf: pygame.Surface, camera: Camera, b: Bullet) -> None:
     sx, sy = camera.world_to_screen(b.pos)
     pygame.draw.circle(surf, BULLET_COLOR, (int(sx), int(sy)),
                        max(1, int(camera.scale(BULLET_RADIUS))))
+
+
+def draw_debris(surf: pygame.Surface, camera: Camera, d: Debris) -> None:
+    # A short tumbling sliver -- enough to telegraph "something is
+    # falling there" without competing with bullets visually.
+    sx, sy = camera.world_to_screen(d.pos)
+    r = max(2.0, camera.scale(SCRAP_DEBRIS_RADIUS) * 1.6)
+    dx = math.cos(d.angle) * r
+    dy = math.sin(d.angle) * r
+    pygame.draw.line(surf, SCRAP_DEBRIS_COLOR,
+                     (sx - dx, sy - dy), (sx + dx, sy + dy), 2)
 
 
 def draw_enemy(surf: pygame.Surface, camera: Camera, e: Enemy) -> None:
@@ -2919,8 +3059,10 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             # into a visible instruction.
             landed_red = (255, 90, 90)
             if ship.mining_target is not None:
+                verb = ("SALVAGING" if ship.mining_target.is_scrap
+                        else "MINING")
                 lines.append((
-                    f"LANDED  -  refueling + MINING ({MINING_RATE:.0f}/s)"
+                    f"LANDED  -  refueling + {verb} ({MINING_RATE:.0f}/s)"
                     f"  -  hold Shift+W to take off",
                     landed_red,
                 ))
@@ -3523,6 +3665,7 @@ def save_session(path: str, universe_spec: dict, sim_time: float,
                  deposits: list[Deposit], pads: list[BuildPad],
                  turrets: list[Turret], enemies: list[Enemy],
                  batteries: list[PlanetaryBattery],
+                 scrap: list[Deposit], debris: list[Debris],
                  kills: int, enemies_enabled: bool, batteries_enabled: bool,
                  enemy_spawn_timer: float, paused: bool,
                  plan_burn_duration: float, plan_burn_offset: float,
@@ -3591,6 +3734,26 @@ def save_session(path: str, universe_spec: dict, sim_time: float,
             }
             for b in batteries
         ],
+        # Pre-scrap saves won't carry these keys; load tolerates their
+        # absence (same contract as missile_printers above).
+        "scrap": [
+            {
+                "body": s.body.name,
+                "angle": s.angle,
+                "quantity": s.quantity,
+                "max_quantity": s.max_quantity,
+            }
+            for s in scrap
+        ],
+        "debris": [
+            {
+                "pos": _v2list(d.pos),
+                "vel": _v2list(d.vel),
+                "value": d.value,
+                "lifetime": d.lifetime,
+            }
+            for d in debris
+        ],
         "stats": {
             "kills": kills,
             "enemies_enabled": enemies_enabled,
@@ -3646,6 +3809,7 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
                   pads: list[BuildPad], turrets: list[Turret],
                   enemies: list[Enemy], bullets: list[Bullet],
                   batteries: list[PlanetaryBattery],
+                  scrap: list[Deposit], debris: list[Debris],
                   maneuver_queue: list) -> dict:
     """Apply a save dict to live mutable state in-place. Returns scalar
     fields the caller has to rebind in main()'s frame (sim_time, paused,
@@ -3738,6 +3902,25 @@ def apply_session(data: dict, ship: "Ship", camera: Camera,
             b.alive = bool(bdata.get("alive", True))
             b.aim_point = None
             b.solve_age = BATTERY_SOLVE_INTERVAL
+
+    # Pre-scrap saves won't have these keys -- .get([]) keeps them loading.
+    scrap.clear()
+    for sdata in data.get("scrap", []):
+        body = body_by_name.get(sdata.get("body"))
+        if body is None:
+            continue
+        pile = Deposit(body, float(sdata.get("angle", 0.0)),
+                       quantity=float(sdata.get("quantity", 0.0)),
+                       is_scrap=True)
+        pile.max_quantity = float(sdata.get("max_quantity", pile.quantity))
+        scrap.append(pile)
+
+    debris.clear()
+    for ddata in data.get("debris", []):
+        d = Debris(_list2v(ddata["pos"]), _list2v(ddata["vel"]),
+                   float(ddata.get("value", SCRAP_VALUE)))
+        d.lifetime = float(ddata.get("lifetime", SCRAP_DEBRIS_LIFETIME))
+        debris.append(d)
 
     # In-flight bullets are cosmetic + fire-and-forget; drop on load.
     bullets.clear()
@@ -3857,6 +4040,8 @@ def main() -> None:
         build_world_for(current_universe)
     )
     missiles: list[Missile] = []
+    debris: list[Debris] = []
+    scrap: list[Deposit] = []   # is_scrap=True piles; see Scrap constants
     ship = Ship(planet)
     stars = Starfield()
     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
@@ -3989,6 +4174,7 @@ def main() -> None:
                 path, current_universe,
                 sim_time, ship, camera, deposits,
                 pads, turrets, enemies, batteries,
+                scrap, debris,
                 kills, enemies_enabled, batteries_enabled,
                 enemy_spawn_timer, paused, plan_burn_duration,
                 plan_burn_offset, maneuver_queue,
@@ -4003,7 +4189,8 @@ def main() -> None:
 
     def _do_quickload(slot: int) -> None:
         nonlocal bodies, planet, sun, deposits, pads, turrets, bullets
-        nonlocal enemies, batteries, missiles, current_universe
+        nonlocal enemies, batteries, missiles, debris, scrap
+        nonlocal current_universe
         nonlocal sim_time, paused, plan_burn_duration, plan_burn_offset
         nonlocal kills, enemies_enabled, batteries_enabled
         nonlocal enemy_spawn_timer, predict_seconds, predict_target_steps
@@ -4023,11 +4210,14 @@ def main() -> None:
             build_world_for(loaded_universe)
         )
         missiles = []
+        debris = []
+        scrap = []
         current_universe = loaded_universe
         # Phase 2 -- overlay sim state onto the freshly built world.
         result = apply_session(
             loaded, ship, camera, bodies, deposits,
             pads, turrets, enemies, bullets, batteries,
+            scrap, debris,
             maneuver_queue,
         )
         sim_time = result["sim_time"]
@@ -4094,6 +4284,8 @@ def main() -> None:
                                     build_world_for(current_universe)
                                 )
                                 missiles = []
+                                debris = []
+                                scrap = []
                                 ship.reset(planet)
                                 enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                                 kills = 0
@@ -4152,6 +4344,8 @@ def main() -> None:
                         build_world_for(current_universe)
                     )
                     missiles = []
+                    debris = []
+                    scrap = []
                     ship.reset(planet)
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                     kills = 0
@@ -4187,6 +4381,8 @@ def main() -> None:
                         build_world_for(current_universe)
                     )
                     missiles = []
+                    debris = []
+                    scrap = []
                     ship.reset(planet)
                     enemy_spawn_timer = ENEMY_SPAWN_INTERVAL * 0.5
                     kills = 0
@@ -4647,7 +4843,9 @@ def main() -> None:
                 ship.apply_pending_maneuvers(sim_time)
 
                 mouse_aim_active = not build_held
-                ship.update(PHYSICS_DT, keys, mods, deposits, bodies,
+                # deposits + scrap: the mining beam treats salvage piles
+                # exactly like ore deposits (nearest-in-range wins).
+                ship.update(PHYSICS_DT, keys, mods, deposits + scrap, bodies,
                             mouse_pos=mouse_pos,
                             mouse_aim_active=mouse_aim_active,
                             sim_time=sim_time)
@@ -4668,10 +4866,14 @@ def main() -> None:
                 for e in enemies:
                     if not e.alive:
                         continue
-                    e.update(PHYSICS_DT, bodies, ship_pos)
+                    crash = e.update(PHYSICS_DT, bodies, ship_pos)
+                    if crash is not None:
+                        # Terrain kill: wreck is already on the surface.
+                        deposit_scrap(scrap, crash[0], crash[1], SCRAP_VALUE)
                     if ship.alive and (e.pos - ship.pos).length() <= ENEMY_RADIUS + SHIP_LEN * 0.6:
                         e.alive = False
                         ship.alive = False
+                        debris.append(spawn_debris(e.pos, e.vel, SCRAP_VALUE))
 
                 for t in turrets:
                     t.update(PHYSICS_DT, enemies, bullets)
@@ -4693,9 +4895,11 @@ def main() -> None:
                     m.update(PHYSICS_DT, sim_time, bodies)
 
                 # Missile detonation: AA batteries first (the priority
-                # target), then UFOs. UFO kills earn the same ore reward
-                # as a turret-kill so the missile can pay back its cost
-                # over time when used against chasers.
+                # target), then UFOs. Kills drop wreckage rather than
+                # crediting ore -- a UFO sheds falling debris, a battery
+                # collapses into a salvage pile right at its mount (it's
+                # already on the surface). Going and collecting the scrap
+                # IS the payback loop for the missile's ore cost.
                 for m in missiles:
                     if not m.alive:
                         continue
@@ -4706,6 +4910,8 @@ def main() -> None:
                         if (m.pos - bat.pos).length() <= MISSILE_BLAST_RADIUS + BATTERY_BODY:
                             bat.alive = False
                             m.alive = False
+                            deposit_scrap(scrap, bat.body, bat.mount_angle,
+                                          SCRAP_VALUE_BATTERY)
                             hit = True
                             break
                     if hit:
@@ -4716,7 +4922,8 @@ def main() -> None:
                         if (m.pos - e.pos).length() <= MISSILE_BLAST_RADIUS + ENEMY_RADIUS:
                             e.alive = False
                             m.alive = False
-                            ship.ore += ENEMY_KILL_REWARD
+                            debris.append(spawn_debris(e.pos, e.vel,
+                                                       SCRAP_VALUE))
                             kills += 1
                             break
 
@@ -4753,15 +4960,30 @@ def main() -> None:
                         if (b.pos - e.pos).length() <= ENEMY_RADIUS + BULLET_RADIUS:
                             e.alive = False
                             b.alive = False
-                            ship.ore += ENEMY_KILL_REWARD
+                            debris.append(spawn_debris(e.pos, e.vel,
+                                                       SCRAP_VALUE))
                             kills += 1
                             break
+
+                # Wreckage falls AFTER all kill sites so a chunk spawned
+                # this tick gets its first integration step this tick
+                # (same convention as printers -> missiles above).
+                for d in debris:
+                    landed_at = d.update(PHYSICS_DT, sim_time, bodies)
+                    if landed_at is not None:
+                        deposit_scrap(scrap, landed_at[0], landed_at[1],
+                                      d.value)
 
                 enemies = [e for e in enemies if e.alive]
                 bullets = [b for b in bullets if b.alive]
                 turrets = [t for t in turrets if t.alive]
                 batteries = [b for b in batteries if b.alive]
                 missiles = [m for m in missiles if m.alive]
+                debris = [d for d in debris if d.alive]
+                # Emptied scrap piles vanish (ore deposits leave husks);
+                # ship.mining_target re-picks next tick so a dangling ref
+                # lives at most one render frame.
+                scrap = [s for s in scrap if not s.depleted]
                 # Detach dead printers from their pads so the green
                 # occupied-rim drops and the slot can be rebuilt.
                 for p in pads:
@@ -5096,6 +5318,8 @@ def main() -> None:
 
         for dep in deposits:
             draw_deposit(screen, camera, dep)
+        for s in scrap:
+            draw_deposit(screen, camera, s)
         for p in pads:
             draw_buildpad(screen, camera, p)
         for t in turrets:
@@ -5109,6 +5333,8 @@ def main() -> None:
             draw_bullet(screen, camera, b)
         for m in missiles:
             draw_missile(screen, camera, m)
+        for d in debris:
+            draw_debris(screen, camera, d)
         for e in enemies:
             draw_enemy(screen, camera, e)
 

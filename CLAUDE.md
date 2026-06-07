@@ -24,6 +24,28 @@ doc -- if `ls` doesn't show it, try `ls -la` or unhide hidden folders.
 Commit history is a reliable source of truth for *what* changed and
 *why*; commit messages are kept descriptive on purpose (see `git log`).
 
+## Cowork sandbox landmines (read before touching git or editing files)
+
+Two mount-layer failure modes, discovered 2026-06-07/08, bite Claude
+sessions working on this repo through the Cowork sandbox:
+
+1. **Porcelain git index writes corrupt `.git/index`.** The mount
+   zero-fills rename-over-an-existing-file, which is exactly how git
+   writes the index, so `git add`/`git commit` die with "bad signature
+   0x00000000". Recovery + working pattern (temp index in /tmp,
+   rename-to-new only): WORKLOG.md 2026-06-07 entry.
+2. **Stale attribute cache truncates cross-side edits.** After a file
+   is edited from the Windows side (Claude's Read/Write/Edit tools),
+   bash still sees the old byte size and reads a truncated view -- and
+   a `git add` through the mount will commit a truncated blob (this
+   happened; see WORKLOG.md 2026-06-08). Safe pattern: make doc edits
+   from the bash side (write temp file, `rm` original, `mv` into
+   place = fresh inode), or stage a fresh-inode copy and verify with
+   `git show HEAD:<file> | diff - <copy>` before committing.
+
+If bash output for a file looks impossibly truncated, suspect the
+cache before suspecting the file.
+
 ## Existing documentation — read these before non-trivial work
 
 The author has split design docs by topic. Always consult the relevant doc(s) before changes that touch their domain — they encode load-bearing invariants and bug-fix history:

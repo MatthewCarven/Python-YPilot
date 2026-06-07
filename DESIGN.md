@@ -440,12 +440,43 @@ Then add `±5 % range × random` aim noise per frame for the "dumb
 turret" feel. There's no recursive lead-calc — one pass is good enough
 for the gameplay budget.
 
-Enemy-ship contact = instant kill (currently). Bullet-enemy contact
-gives `ENEMY_KILL_REWARD = 6 ore` per kill. AA-bullet-ship contact is
+Enemy-ship contact = instant kill (currently). Kills no longer credit
+ore directly -- see "Scrap economy" below. AA-bullet-ship contact is
 also instant kill — same damage as a UFO collision. AA-bullet-body
 contact (the AA fired through its own planet) silently absorbs the
 bullet on impact, so optimistic firing solutions don't grief the player
 from the wrong side of a planet.
+
+### Scrap economy (added 2026-06-08)
+
+Kill rewards are physical now. A destroyed UFO sheds a wreckage chunk
+(`Debris`) that inherits `SCRAP_INHERIT_VEL = 40 %` of the victim's
+velocity plus a random kick, then falls ballistically -- same leapfrog +
+`gravity_at_t` sampling as missiles, so it tracks a moving system
+correctly. On touching a landable surface it becomes a **scrap pile**
+(a `Deposit` with `is_scrap=True`, drawn as a squat grey heap) holding
+`SCRAP_VALUE = 12` ore. Land within mining range and the beam salvages
+it exactly like ore -- the HUD reads SALVAGING instead of MINING.
+
+Lifecycle rules: piles within `SCRAP_MERGE_DIST = 14` arc-px merge, so
+a defended planet accumulates a few fat piles instead of litter;
+`SCRAP_MAX_PILES = 30` hard-caps the list (smallest pile culled first);
+emptied piles vanish entirely (ore deposits leave depleted husks). UFOs
+that crash into terrain leave scrap at the impact point directly -- the
+wreck is already on the surface. Debris that hits a non-landable body
+(the sun) vaporises; debris that never lands is culled after
+`SCRAP_DEBRIS_LIFETIME = 90 s`. A missile-killed AA battery collapses
+into a `SCRAP_VALUE_BATTERY = 40` pile at its mount angle, so anti-AA
+strikes create salvage expeditions. Both piles and still-falling chunks
+round-trip through save/load.
+
+Why physical: the old instant `+6` credit meant turtling auto-banked
+ore with zero player motion, and missiles (then 30 ore/shot) ran -24
+net per kill -- strictly dominated by free turret bullets, so printers
+never got built. Salvage worth 2x the old credit prices in the
+collection trip, and at the rebalanced 10 ore/shot a missile kill
+roughly pays for itself IF you go get the wreck -- profitable when one
+blast takes out several chasers.
 
 ### Planetary AA batteries
 
@@ -477,11 +508,13 @@ mid-air after the toggle.
 
 Player-built counter to AA batteries (and a longer-range anti-UFO
 option). Constructed on a build pad like a turret but pricier
-(`MISSILE_PRINTER_COST = 150`), longer-ranged
+(`MISSILE_PRINTER_COST = 100`), longer-ranged
 (`MISSILE_PRINTER_RANGE = 5000`), and slower-firing
 (`MISSILE_PRINTER_COOLDOWN = 8 s`). Each shot also costs
-`MISSILE_ORE_COST = 30` ore at fire-time, so the structure remains a
-sustained drain on the economy rather than fire-and-forget.
+`MISSILE_ORE_COST = 10` ore at fire-time, so the structure remains a
+sustained drain on the economy rather than fire-and-forget -- but at 10
+vs the 12-ore salvage a UFO wreck drops, a printer roughly pays for its
+own ammunition if you collect what it kills (see "Scrap economy").
 
 Target priority: **AA batteries > UFOs**. Once an AA battery is in
 range, every shot goes there until it's gone, then the printer falls
@@ -711,10 +744,15 @@ tweaked by feel:
 | `BATTERY_FIRE_COOLDOWN` | 4.0 | Seconds between AA shots |
 | `BATTERY_LASER_DURATION` | 1.0 | Targeting-laser telegraph window before firing |
 | `BATTERY_SPAWN_PROBABILITY` | 0.5 | Per-landable-body roll for AA presence |
-| `MISSILE_PRINTER_COST` | 150 | Build cost (vs `TURRET_COST = 50`) |
+| `MISSILE_PRINTER_COST` | 100 | Build cost (vs `TURRET_COST = 50`) |
 | `MISSILE_PRINTER_RANGE` | 5000 | Hostile-detection range (vs `TURRET_RANGE = 380`) |
 | `MISSILE_PRINTER_COOLDOWN` | 8.0 | Seconds between launches |
-| `MISSILE_ORE_COST` | 30 | Ore consumed per missile launched |
+| `MISSILE_ORE_COST` | 10 | Ore per launch (~break-even vs `SCRAP_VALUE` if salvaged) |
+| `SCRAP_VALUE` | 12 | Ore in a UFO wreck (2x the retired instant +6: prices in the pickup trip) |
+| `SCRAP_VALUE_BATTERY` | 40 | Ore in a downed AA battery's salvage pile |
+| `SCRAP_MERGE_DIST` | 14 | Arc-px within which surface piles merge |
+| `SCRAP_MAX_PILES` | 30 | Pile cap; smallest culled first |
+| `SCRAP_DEBRIS_LIFETIME` | 90 | Seconds before never-landing wreckage is culled |
 | `MISSILE_PLAN_HORIZON` | 12.0 | Seconds the at-launch flight planner integrates forward |
 | `MISSILE_BLAST_RADIUS` | 18 | Detonation proximity radius |
 | `CAM_PAN_RECENTER_SECONDS` | 7.0 | LMB-drag camera ease-back duration |

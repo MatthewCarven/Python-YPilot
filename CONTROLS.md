@@ -154,7 +154,7 @@ at any speed.
 | Input | Effect |
 |---|---|
 | **B (hold)** | Open the build menu while landed near an unoccupied build pad. |
-| **Mouse click** | Confirm a build option from the menu. Two options today: **Dumb Turret** (50 ore) — anti-UFO, short range; **Missile Printer** (150 ore) — anti-AA + anti-UFO, 5000-unit range, 30 ore per launch. Each missile gets a bespoke orange flight plan computed at launch and flies it under gravity. Targets AA batteries first, then UFOs. |
+| **Mouse click** | Confirm a build option from the menu. Two options today: **Dumb Turret** (50 ore) — anti-UFO, short range; **Missile Printer** (100 ore) — anti-AA + anti-UFO, 5000-unit range, 10 ore per launch. Each missile gets a bespoke orange flight plan computed at launch and flies it under gravity. Targets AA batteries first, then UFOs. Destroyed hostiles drop wreckage that falls to the surface as grey scrap piles — land beside one and the mining beam salvages it like ore (12 per UFO, 40 per AA battery; HUD shows SALVAGING). Salvage is the only kill reward; nothing is credited at the moment of kill. |
 | **Release B** | Close the menu. |
 
 ## Plan-mode (Space)
