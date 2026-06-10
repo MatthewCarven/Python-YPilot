@@ -1778,6 +1778,36 @@ def generate_buildpads(body: Body, n: int = NUM_BUILDPADS) -> list[BuildPad]:
     return out
 
 
+def roll_bonus_deposits(bodies: list[Body], starter: Body, destination: Body,
+                        sun: Body, seed: int) -> list:
+    """Seeded sprinkle of surprise ore on bodies outside the fixed
+    starter/destination quotas. Middle planets roll 0-2 bonus deposits
+    (40/35/25 weights, avg ~0.85 each); landable moons roll 0-1 (35%).
+    The salt is chosen so the default world (seed 0) rolls exactly one
+    bonus deposit on Ember and none on the Moon -- Ember's forward base
+    gets a local strike, the Moon stays the bare precision-landing
+    challenge.
+    Expected bonus is ~+1 in the default world and ~+2-3 in a busy random
+    one -- enough that detouring off the starter->destination axis can pay,
+    not enough to skip the Frostbite-style expedition. Counts AND angles
+    come from a salted universe-seed RNG (same pattern as _roll_batteries)
+    so a given seed always yields the same bonus ore layout; angles are
+    fully random rather than evenly spread -- these are strikes you stumble
+    on, not surveyed fields."""
+    rng = random.Random(seed ^ 0x0DE5EF8)
+    out = []
+    for b in bodies:
+        if not b.landable or b is starter or b is destination:
+            continue
+        if b.parent is sun:
+            n = rng.choices((0, 1, 2), weights=(40, 35, 25))[0]
+        else:
+            n = 1 if rng.random() < 0.35 else 0
+        out.extend(Deposit(b, rng.uniform(0.0, 2.0 * math.pi))
+                   for _ in range(n))
+    return out
+
+
 # ============================================================================
 # Ship
 # ============================================================================
@@ -3319,6 +3349,12 @@ def build_world_for(spec: dict) -> tuple[
             pads.extend(generate_buildpads(b, n=3))
     for b in landable_moons:
         pads.extend(generate_buildpads(b, n=2))
+
+    # Bonus ore sprinkle on top of the fixed quotas (default world included
+    # -- it rolls with seed 0, same convention as batteries). Ember's "no
+    # ore, haul it in" rule is hereby softened to "usually no ore".
+    deposits.extend(roll_bonus_deposits(
+        bodies, starter, destination, sun, int(spec.get("seed", 0))))
 
     batteries = _roll_batteries(bodies, int(spec.get("seed", 0)))
     return bodies, starter, sun, deposits, pads, [], [], [], batteries

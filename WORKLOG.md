@@ -1,5 +1,25 @@
 # Worklog
 
+## 2026-06-10
+
+- **Bonus ore sprinkle at universe generation** (Matthew's ask: more
+  random ore overall, current arrangement intact, exploration still
+  driven). New `roll_bonus_deposits()` in `build_world_for`: middle
+  planets roll 0–2 bonus deposits (40/35/25), landable moons 0–1
+  (35%), starter/destination quotas (2/6) untouched. Salted seeded RNG
+  (`seed ^ 0x0DE5EF8`, battery convention) — same seed, same layout;
+  salt picked so the default world (seed 0) rolls Ember 1 / Moon 0,
+  softening Ember's "no ore" rule per Matthew's "both worlds" call.
+  Monte Carlo over 3000 seeds: mean +2.03 bonus, 38% roll zero (mostly
+  small systems with no middle bodies), max +10 on 6-planet sprawls.
+  Bonus deposits append after fixed quotas so by-index save restore
+  stays compatible (old saves load; bonus deposits arrive full).
+  Noted in passing: base deposit *angles* jitter from the global RNG,
+  so they were never seed-deterministic — pre-existing, only counts
+  and bonus angles are pinned. DESIGN.md body-roles + allocation
+  sections updated. Awaiting playtest alongside the scrap economy.
+
+
 ## 2026-06-08
 
 - **Shipped step 1 of the gameplay-elements arc: scrap economy +

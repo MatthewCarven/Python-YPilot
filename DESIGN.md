@@ -87,7 +87,9 @@ gives each body a distinct role:
 - **Planet** — main fortress (5 build pads), starter ore (2 deposits).
 - **Moon** — moving point-defense platform (2 build pads orbiting Planet
   at ~12 s period). No ore.
-- **Ember** — forward base (3 build pads), no ore. You haul ore here.
+- **Ember** — forward base (3 build pads), 1 bonus deposit (rolled by
+  the seed-0 bonus sprinkle, see Allocation policy). Mostly you still
+  haul ore here.
 - **Frostbite** — the ore world (6 deposits), no defenses. A
   ~92 s Hohmann from Planet, ~146 s from Ember. The round trip is the
   whole point: every defensive build commits the player to a real
@@ -160,6 +162,20 @@ regardless of how many planets rolled.
 In a single-planet system, the lone planet collapses both roles —
 6 deposits + 5 pads. Defensive builds compete with mining for the
 same surface real estate, which is its own kind of puzzle.
+
+On top of the fixed quotas, `roll_bonus_deposits` sprinkles surprise
+ore on the bodies that would otherwise have none: middle planets roll
+0–2 bonus deposits (40/35/25 weights, avg ~0.85 each), landable moons
+0–1 (35%). Random universes average ~+2 deposits; small systems with
+no middle bodies roll nothing. Counts and angles come from a salted
+universe-seed RNG (`seed ^ 0x0DE5EF8`, same convention as batteries)
+so a seed always yields the same bonus layout — and the salt is chosen
+so the default world (seed 0) rolls exactly one deposit on Ember and
+none on the Moon. The point is to make detours off the
+starter→destination axis occasionally pay without ever rivalling the
+destination's 6-deposit motherlode — exploration stays a gamble, the
+expedition stays mandatory. Bonus deposits are appended after the
+fixed quotas so save-file deposit indices stay stable.
 
 AA batteries are rolled per-world with a seed offset
 (`seed ^ 0xBA77E1F`) so the same world seed always produces the same
