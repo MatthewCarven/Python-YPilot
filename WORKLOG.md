@@ -18,6 +18,14 @@
   so they were never seed-deterministic — pre-existing, only counts
   and bonus angles are pinned. DESIGN.md body-roles + allocation
   sections updated. Awaiting playtest alongside the scrap economy.
+- **Jun-7 truncated blob had also been PUSHED.** Matthew's `git push`
+  bounced (non-fast-forward): remote tip `74037da` turned out to be the
+  truncated-WORKLOG commit from the 2026-06-07 stale-cache incident --
+  its blob ends mid-sentence ("earlier a", no trailing newline) and
+  drops the back half of the 2026-05-19 section. Local `ef48073` is the
+  good redo; local main is the correct lineage. Resolution: do NOT
+  pull/merge (would resurrect the truncated file) -- force-push over
+  it. Handed Matthew `git push --force-with-lease origin main`.
 
 
 ## 2026-06-08
