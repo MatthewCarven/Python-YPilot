@@ -2,6 +2,21 @@
 
 ## 2026-06-10
 
+- **Drafted RAIDS_PLAN.md (gameplay arc step 2) -- design only, no
+  code.** Core calls proposed: turrets/printers get `STRUCTURE_HP = 3`
+  and collapse into 40%-of-cost scrap (pad survives); beam-repair at
+  5 ore/HP while landed near; new kamikaze raider *intent* on the
+  existing Enemy chassis (targets nearest structure, 1 HP damage in an
+  18 arc-px blast, converts to chaser if no structures exist -- system
+  inert until the player builds); wave director CALM -> 10 s WARNING
+  telegraph -> RAID burst, threat driven by structures + lifetime ore
+  (not wall-clock), waves target the most-fortified body so Frostbite
+  runs stay calm; trickle slows 9 s -> 18 s between waves; F10
+  semantics preserved; save v2 -> v3 with defaulted fields. Phased
+  A (HP plumbing) / B (raider) / C (director), one session each,
+  playtest-gated. Five open questions for Matthew at the bottom of the
+  doc; TASKS.md step-2 bullet now points there and is marked blocked
+  on those answers + the step-1 playtest.
 - **Bonus ore sprinkle at universe generation** (Matthew's ask: more
   random ore overall, current arrangement intact, exploration still
   driven). New `roll_bonus_deposits()` in `build_world_for`: middle

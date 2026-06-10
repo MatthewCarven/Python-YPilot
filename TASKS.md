@@ -14,10 +14,14 @@ In flight: the **gameplay-elements arc** (planned with Matthew
   do piles cluster sensibly around the fortress? is 10/shot vs 12
   salvage the right missile margin? Knobs: `SCRAP_VALUE`,
   `SCRAP_VALUE_BATTERY`, `SCRAP_MERGE_DIST`, `SCRAP_SCATTER_SPEED`.
-- **Step 2 (decided, not started): escalating raids** that target
-  structures, not just the ship. Needs structure HP + a wave director.
-  Pairs with scrap: bigger waves -> more salvage -> bigger defenses.
-  Should respect the F10 spawn toggle so pressure stays opt-in.
+- **Step 2 (planned 2026-06-10, not started): escalating raids** that
+  target structures, not just the ship. Full design in
+  [RAIDS_PLAN.md](RAIDS_PLAN.md): structure HP + beam repair, kamikaze
+  raider intent, threat-driven wave director with a 10 s telegraph,
+  three one-session phases. **Blocked on Matthew answering the open
+  questions at the bottom of that doc** (threat driver, repair model,
+  raider-vs-ship lethality, wave targeting, hostile cap), and on the
+  step-1 playtest verdict.
 - **Step 3 (undecided): harvester structure vs asteroid mining.**
   Harvester wants a renewable ore source to exist first (scrap from
   raids may be enough); asteroids are the skill-expression option.
