@@ -7,6 +7,19 @@ the retired-feature graveyard is in [DESIGN.md § Deferred TODO](DESIGN.md#defer
 In flight: the **gameplay-elements arc** (planned with Matthew
 2026-06-07).
 
+**Session state as of 2026-06-10** (for whoever picks this up next):
+
+- Local main = `2c19ad1` (raids plan) -- **needs `git push`** (Matthew
+  runs pushes natively).
+- Playtest queue, in one field run: (a) scrap economy feel questions
+  below; (b) ore sprinkle (commit `70a382f`) -- default world should
+  show exactly 1 new deposit on Ember, Moon stays bare; roll some
+  Shift+R universes and judge whether middle-planet strikes feel like
+  finds or freebies.
+- Step 2 (raids) is fully planned in RAIDS_PLAN.md but **blocked on
+  Matthew's answers to its 5 open questions** + the playtest verdicts.
+  Next coding session starts at Phase A (structure HP) once unblocked.
+
 - **Step 1 -- scrap economy + missile rebalance: SHIPPED 2026-06-08.**
   Kills drop salvageable wreckage instead of instant ore; missiles
   150/30 -> 100/10. Headless-tested only -- **needs playtest**. Feel
