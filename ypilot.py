@@ -3360,6 +3360,28 @@ def build_world_for(spec: dict) -> tuple[
     return bodies, starter, sun, deposits, pads, [], [], [], batteries
 
 
+def random_universe_hud_text(bodies: list[Body], sun: Body, seed: int) -> str:
+    """One-line "you just rolled a world" HUD summary.
+
+    Shared by every random-universe entry vector -- Shift+R, Ctrl+Shift+R
+    (custom seed) and the Ctrl+Alt+Shift+N quick-roll -- so their readouts
+    can't drift apart. Counts come from the freshly-built world: planets are
+    the sun's direct children; moons are everything else orbiting a non-sun
+    body (sub-moons included). Pass the `bodies`/`sun` returned by
+    build_world_for, not stale pre-roll state.
+    """
+    n_planets = sum(1 for b in bodies if b.parent is sun)
+    n_moons = sum(
+        1 for b in bodies if b.parent is not None and b.parent is not sun
+    )
+    return (
+        f"random universe: "
+        f"{n_planets} planet{'s' if n_planets != 1 else ''}, "
+        f"{n_moons} moon{'s' if n_moons != 1 else ''}, "
+        f"seed {seed}"
+    )
+
+
 # ============================================================================
 # Video recorder
 # ============================================================================
@@ -4332,7 +4354,7 @@ def main() -> None:
                                 time_scale = TIME_SCALE_DEFAULT
                                 predict_cache["age"] = PREDICT_CACHE_INTERVAL
                                 hud_message = (
-                                    f"random universe: seed {seed}",
+                                    random_universe_hud_text(bodies, sun, seed),
                                     time.time() + HUD_MESSAGE_DURATION,
                                 )
                             else:
@@ -4369,16 +4391,21 @@ def main() -> None:
                         seed_prompt_buffer = ""
                         continue
                     sim_time = 0.0
-                    if event.mod & pygame.KMOD_SHIFT:
+                    rolled_fresh = bool(event.mod & pygame.KMOD_SHIFT)
+                    if rolled_fresh:
                         seed = random.randrange(2 ** 31)
                         current_universe = {"type": "random", "seed": seed}
-                        hud_message = (
-                            f"random universe: seed {seed}",
-                            time.time() + HUD_MESSAGE_DURATION,
-                        )
                     bodies, planet, sun, deposits, pads, turrets, bullets, enemies, batteries = (
                         build_world_for(current_universe)
                     )
+                    if rolled_fresh:
+                        # Announce after the build so the planet/moon counts
+                        # reflect the new system, not the outgoing one. Plain
+                        # R (rebuild, no Shift) stays silent as before.
+                        hud_message = (
+                            random_universe_hud_text(bodies, sun, seed),
+                            time.time() + HUD_MESSAGE_DURATION,
+                        )
                     missiles = []
                     debris = []
                     scrap = []
@@ -4429,8 +4456,7 @@ def main() -> None:
                     time_scale = TIME_SCALE_DEFAULT
                     predict_cache["age"] = PREDICT_CACHE_INTERVAL
                     hud_message = (
-                        f"random universe: {n_planets_pin} planet"
-                        f"{'s' if n_planets_pin != 1 else ''}, seed {seed}",
+                        random_universe_hud_text(bodies, sun, seed),
                         time.time() + HUD_MESSAGE_DURATION,
                     )
                 elif event.key == pygame.K_SPACE:

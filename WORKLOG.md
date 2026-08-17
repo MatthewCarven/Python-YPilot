@@ -1,5 +1,26 @@
 # Worklog
 
+## 2026-08-17
+
+- **All three random-universe HUD readouts now report planets + moons +
+  seed** (were: quick-roll showed planets + seed; Shift+R and Ctrl+Shift+R
+  showed seed only). Unified behind a new module-level helper
+  `random_universe_hud_text(bodies, sun, seed)` (defined right after
+  `build_world_for`) so the three entry vectors -- Shift+R, Ctrl+Shift+R
+  custom seed, Ctrl+Alt+Shift+N quick-roll -- can't drift apart. Counts
+  are derived from the freshly-built world: planets = sun's direct
+  children, moons = everything orbiting a non-sun body (sub-moons
+  included; moon total caps at `RANDOM_MOONS_TOTAL_MAX = 4`).
+  Pluralisation per-count.
+- **Shift+R message moved to after `build_world_for`.** It used to be
+  built *before* the rebuild, so it read the outgoing world's `bodies`
+  (fine when it only printed the seed, wrong now that it counts bodies).
+  Guarded on a `rolled_fresh` flag; plain R (rebuild, no Shift) stays
+  silent exactly as before.
+- Compiles clean (`py_compile`); playtest-observed only, no physics/
+  logic path touched. Change is in `ypilot.py`; uncommitted pending
+  Matthew's native commit.
+
 ## 2026-06-10
 
 - **Drafted RAIDS_PLAN.md (gameplay arc step 2) -- design only, no
