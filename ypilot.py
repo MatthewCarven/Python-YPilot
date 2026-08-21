@@ -696,7 +696,7 @@ class Camera:
 
     def __init__(self):
         self.pos = Vector2(0.0, 0.0)
-        self.zoom = 1.0
+        self.zoom = 0.25
 
     def world_to_screen(self, p: Vector2) -> tuple[float, float]:
         """Return (x, y) screen-space tuple for a world-space point."""
@@ -5365,6 +5365,8 @@ def main() -> None:
                 if d2 < best_d2:
                     best_d2 = d2
                     ca_target = b
+
+
         # Thrust-preview peek (hold Tab). Computed here but DRAWN after the
         # cyan predict below -- the first cut drew it underneath, and where
         # a ghost runs within a few pixels of the cyan line (which the retro
