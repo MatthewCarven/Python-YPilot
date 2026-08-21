@@ -370,10 +370,40 @@ Design notes:
   mirrors the launch-pad bump into the snapshot (see *Predictor-snapshot
   on commit*), and duplicating that here would buy nothing.
 
-Cost, measured on the dev box (default 5-body world, 30 s horizon):
-`THRUST_PREVIEW_TARGET_STEPS = 150` puts one refresh of both ghosts at
-~10 ms, which uncached would be a bigger per-frame bill than the cyan
-line itself. They therefore ride their own cache on the same
+**The ghost horizon is decoupled from the cyan line's.** This is the
+single most important thing about the overlay's tuning, and it took a
+second playtest to get right. The first cut spent a fixed step budget
+over the full `predict_seconds`, which meant two bugs wearing one coat:
+
+- *Quality.* 150 steps across 30 s forces `dt = 0.2 s`, twelve times the
+  live physics step. A **zero-thrust** ghost then missed the cyan line by
+  ~266 u on pure integration error — so for any small tap the overlay was
+  drawing mostly its own error, not thrust. Worse, that error is a *false
+  deviation floor*: no tap smaller than it can mean anything.
+- *"Too much thrust".* A 22 Δv kick extrapolated over 30 s puts the
+  forward ghost in a visibly different orbit, off the top of the screen.
+  That reads as an enormous burn. The tap was never too big — the horizon
+  was.
+
+Both dissolve at `THRUST_PREVIEW_SECONDS = 5.0` with `dt = PHYSICS_DT`.
+Over that short a horizon the ghost can afford the live physics step,
+making it **bit-equivalent to the cyan line's integrator** (the same
+invariant path-hold relies on), so a zero-thrust ghost lands on the cyan
+line to 0.000000 u and every visible pixel of deviation is thrust. The
+kick now reads as what it is: a small clean deviation that stays beside
+the cyan line and on screen at every zoom. Because the horizon is an
+absolute cap rather than a fraction of `predict_seconds`, cost stays
+bounded however far out `*` pushes the cyan predict.
+
+`THRUST_PREVIEW_STRIDE` is **1**, not `PREDICT_DRAW_STRIDE`'s 6. The
+ghost has ~300 points over 5 s where the cyan line has 1800 over 30 s;
+inheriting the cyan stride left the ghost with 18 on-screen segments and
+obvious polygonal kinks. At stride 1 it draws ~300 segments — the same
+count the cyan line gets, and the same apparent smoothness.
+
+Cost, measured on the dev box (default 5-body world): one refresh of both
+ghosts at 5 s / `PHYSICS_DT` is ~9.4 ms, which uncached would be a bigger
+per-frame bill than the cyan line itself. They therefore ride their own cache on the same
 `PREDICT_CACHE_INTERVAL` cadence — ~3.5 ms/frame all-in while held,
 about 18 % on top of the cyan line. The cache lives in a separate dict
 from `predict_cache` so the cyan line's invalidation conditions (which
@@ -871,8 +901,8 @@ tweaked by feel:
 | `PREDICT_CACHE_INTERVAL` | 3 | Frames between cyan-predict refreshes when running. 1 = no caching. |
 | `PREDICT_TICK_INTERVAL` | 5.0 s | Seconds between perpendicular tick marks |
 | `THRUST_PREVIEW_BURN_SECONDS` | 0.1 | Tap length the Tab ghosts model |
-| `THRUST_PREVIEW_TARGET_STEPS` | 150 | Step budget per ghost; 2.8% endpoint error worst case. Raise if ghosts look kinked |
-| `THRUST_PREVIEW_STRIDE` | 8 | Draw stride for ghosts (coarser than `PREDICT_DRAW_STRIDE`) |
+| `THRUST_PREVIEW_SECONDS` | 5.0 | Ghost horizon, independent of `predict_seconds`. Ghosts run at `PHYSICS_DT`, so this alone sets their cost (`seconds / PHYSICS_DT` steps each) |
+| `THRUST_PREVIEW_STRIDE` | 1 | Draw stride for ghosts. 1 = every sample; the ghost has far fewer points than the cyan line, so it cannot afford to skip any |
 | `THRUST_PREVIEW_WIDTH` | 2 | Ghost line width. 1 px reads as a fringe on the cyan line, not a line of its own |
 | `PREDICT_TICK_HALFLEN` | 5 px | Tick half-length, screen-space (zoom-invariant) |
 | `TIME_SCALE_MIN/MAX` | 1/16 / 16 | F7/F8 clamps |

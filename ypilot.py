@@ -462,18 +462,32 @@ SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 # it stays the most informative value: longer taps throw the forward ghost
 # off-screen within a few seconds, so you lose the shape of the new orbit.
 THRUST_PREVIEW_BURN_SECONDS = 0.1
-# Step budget per ghost. Far coarser than PREDICT_TARGET_STEPS on purpose --
-# the overlay only has to show *how far off the cyan line* the tap puts you,
-# which is a gross displacement, not a precision forecast. Measured endpoint
-# error against a full dt=PHYSICS_DT reference, worst case (low fast orbit,
-# ~400 u altitude, where the fan is ~1700 u):
-#     60 steps -> 8.5% of the fan     150 steps -> 2.8%
-#    100 steps -> 4.5%                200 steps -> 2.0%
-# An order of magnitude better in higher/slower orbits (0.4% at 150). 150 is
-# the knee: visually indistinguishable from the reference at play zooms while
-# costing a third of what 400 did. Raise it if the ghosts ever look kinked.
-THRUST_PREVIEW_TARGET_STEPS = 150
-THRUST_PREVIEW_STRIDE = 8            # coarser than PREDICT_DRAW_STRIDE (6)
+# Ghost horizon, deliberately DECOUPLED from the cyan line's predict_seconds
+# and much shorter than it. Two problems went away at once when this stopped
+# being "same horizon as cyan, coarser dt":
+#
+#  1. *Quality.* Spending a fixed step budget over the full 30 s horizon
+#     forced dt to 0.2 s -- 12x the live physics step. A zero-thrust ghost
+#     then missed the cyan line by ~266 u purely from integration error, so
+#     for any small tap the overlay was drawing mostly its own error. Over a
+#     short horizon the ghost can afford dt = PHYSICS_DT, which makes it
+#     bit-equivalent to the live integrator (same invariant the cyan line
+#     relies on) and drops that false-deviation floor to exactly zero.
+#  2. *"Too much thrust".* A 22 dv kick extrapolated over 30 s puts the
+#     forward ghost in a visibly different orbit, off the top of the screen.
+#     That reads as a huge burn. The same kick over 5 s reads as what it is:
+#     a small, clean deviation that stays next to the cyan line and on
+#     screen at every zoom. The tap was never too big -- the horizon was.
+#
+# Cost is bounded because it is an absolute cap: steps = seconds / PHYSICS_DT
+# regardless of how far out the player pushes the cyan predict with `*`.
+THRUST_PREVIEW_SECONDS = 5.0
+# Draw every sample. The ghost has ~300 points over 5 s, so stride 1 gives it
+# the same ~300 on-screen segments the cyan line gets -- they should look
+# equally smooth. The old stride of 8 was inherited from PREDICT_DRAW_STRIDE
+# without adjusting for the ghost having a twelfth as many points, leaving it
+# with 18 visible segments and obvious polygonal kinks.
+THRUST_PREVIEW_STRIDE = 1
 # 2 px, not 1. A 1 px ghost beside the cyan line's 1-3 px ribbon reads as a
 # fringe on the cyan line rather than a line of its own, especially where
 # the two run within a few pixels of each other near the ship.
@@ -3054,6 +3068,10 @@ def compute_thrust_preview(ship: "Ship", bodies: list[Body], sim_time: float,
     """Held-peek overlay (Tab): predict where a THRUST_PREVIEW_BURN_SECONDS
     tap of W (index 0) or S (index 1) would put you. Returns two point lists.
 
+    `seconds` is the ghost horizon (THRUST_PREVIEW_SECONDS, clamped to the
+    cyan horizon), NOT predict_seconds -- see that constant for why the two
+    are decoupled.
+
     Deliberately **bare lines** -- no apsis / SOI / closest-approach markers,
     no impact dot, no ticks. Those analyses are where the per-frame predictor
     cost actually lives (each walks the whole point list against every body),
@@ -3077,10 +3095,15 @@ def compute_thrust_preview(ship: "Ship", bodies: list[Body], sim_time: float,
                         (retro_thrust_scale(mods), -1.0)):
         dv = forward_dir * (sign * SHIP_THRUST * scale
                             * THRUST_PREVIEW_BURN_SECONDS)
+        # dt=PHYSICS_DT, not a step budget: over this short a horizon the
+        # ghost can afford the live physics step, which makes it
+        # bit-equivalent to the cyan line's integrator. A zero-thrust ghost
+        # then lands exactly on the cyan line, so every pixel of visible
+        # deviation is thrust rather than integration error.
         pts, _, _ = ship.predict_trajectory(
             bodies, sim_time, seconds=seconds,
             vel0=ship.vel + dv,
-            target_steps=THRUST_PREVIEW_TARGET_STEPS,
+            dt=PHYSICS_DT,
             pending_burns=ship.pending_maneuvers,
         )
         paths.append(pts)
@@ -3311,7 +3334,8 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
             fwd_dv, retro_dv = thrust_preview_dv
             lines.append("")
             lines.append(
-                f"THRUST PEEK  {THRUST_PREVIEW_BURN_SECONDS:.2f}s tap:"
+                f"THRUST PEEK  {THRUST_PREVIEW_BURN_SECONDS:.2f}s tap"
+                f"  /  {THRUST_PREVIEW_SECONDS:.0f}s ghost:"
                 f"   W {fwd_dv:+7.2f} dv      S {retro_dv:+7.2f} dv"
             )
         elif thrust_preview_blocked is not None:
@@ -4387,9 +4411,9 @@ def main() -> None:
     # HUD readouts and marker layers depend on -- stay untouched. Same
     # PREDICT_CACHE_INTERVAL cadence, so the ghosts and the cyan line go
     # stale and refresh together and therefore always move as one picture.
-    # Cost note: at THRUST_PREVIEW_TARGET_STEPS the two ghosts run ~9 ms
-    # per refresh on the dev box, which uncached would have been a bigger
-    # per-frame bill than the cyan line itself. Amortized it is ~3 ms.
+    # Cost note: over THRUST_PREVIEW_SECONDS at PHYSICS_DT the two ghosts
+    # run ~9 ms per refresh on the dev box, which uncached would have been a
+    # bigger per-frame bill than the cyan line itself. Amortized it is ~3 ms.
     # "key" holds the inputs that must force an early refresh: the peek
     # key going down (so frame 1 of a peek is never blank) and the trim
     # ladder changing under Shift/Ctrl (so the ghost never previews the
@@ -5366,12 +5390,15 @@ def main() -> None:
             else:
                 fwd_scale = forward_thrust_scale(mods)
                 retro_scale_now = retro_thrust_scale(mods)
-                preview_key = (fwd_scale, retro_scale_now, predict_seconds,
+                # Ghost horizon is its own short constant, clamped so it can
+                # never outrun a deliberately-shortened cyan predict.
+                preview_seconds = min(predict_seconds, THRUST_PREVIEW_SECONDS)
+                preview_key = (fwd_scale, retro_scale_now, preview_seconds,
                                len(ship.pending_maneuvers))
                 if (thrust_preview_cache["age"] >= PREDICT_CACHE_INTERVAL
                         or thrust_preview_cache["key"] != preview_key):
                     thrust_preview_cache["paths"] = compute_thrust_preview(
-                        ship, bodies, sim_time, mods, predict_seconds
+                        ship, bodies, sim_time, mods, preview_seconds
                     )
                     thrust_preview_cache["age"] = 0
                     thrust_preview_cache["key"] = preview_key

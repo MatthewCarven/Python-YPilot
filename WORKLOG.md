@@ -121,6 +121,51 @@
 - Verified by rendering at the default start state at zoom 0.25, 1.0 and
   2.0: three clearly separated lines at all three. **Still not played in
   a real window by me** -- Matthew's next run is the real test.
+- **Playtest #2 on the thrust ghosts: "estimation too low quality and
+  maybe too much thrust ... how many points are we devoting?" Both
+  complaints had one root cause -- the ghosts inherited the cyan line's
+  30 s horizon.** Answer to the question as it stood: 150 points per
+  ghost, but drawn at `THRUST_PREVIEW_STRIDE = 8`, so only **18
+  segments** ever reached the screen against the cyan line's 300. That
+  is the visible kinking. The stride had been copied from
+  `PREDICT_DRAW_STRIDE` without adjusting for the ghost having a twelfth
+  as many points to spend.
+- **The deeper fault was worse than the kinking.** Spending 150 steps
+  over 30 s forces `dt = 0.2 s`, twelve times `PHYSICS_DT`. Measured a
+  **zero-thrust** ghost against the cyan line: it missed by **265.7 u**
+  on integration error alone. That is a false-deviation floor -- for a
+  0.02 s tap the true deviation is 411 u, so ~65% of what the overlay
+  drew was its own error. The step-budget curve is also a cliff, not a
+  slope: 150 -> 265.7 u, 300 -> 249.2, 600 -> 244.1, then 1200 -> 2.2.
+  Nothing short of near-`PHYSICS_DT` is trustworthy over 30 s.
+- **Fix: decouple the ghost horizon from `predict_seconds` and run it at
+  the live physics step.** New `THRUST_PREVIEW_SECONDS = 5.0`, passed as
+  `dt=PHYSICS_DT` rather than a step budget, replacing
+  `THRUST_PREVIEW_TARGET_STEPS` entirely. Stride 8 -> 1. Results, all
+  three complaints at once and for no extra CPU:
+  - 18 on-screen segments -> **300**, matching the cyan line exactly.
+  - False-deviation floor 265.7 u -> **0.000000 u**. The ghost is now
+    bit-equivalent to the cyan integrator (PROGRAM_FLOW invariant 3), so
+    every visible pixel of deviation is thrust.
+  - "Too much thrust" fixed without touching the tap: a 22 dv kick over
+    30 s puts the forward ghost in a different orbit off the top of the
+    screen; the *same* kick over 5 s is a small clean deviation that
+    stays beside the cyan line. The tap was never the problem -- the
+    extrapolation was. `THRUST_PREVIEW_BURN_SECONDS` stays 0.1.
+  - Cost 3.44 -> **3.46 ms/frame**. Essentially free, because a short
+    horizon at fine dt costs about what a long horizon at coarse dt did.
+  Cost is now bounded by an absolute cap rather than tracking
+  `predict_seconds`, so pushing the cyan predict out with `*` no longer
+  drags the ghosts' bill up with it.
+- Verified by rendering the default start state at zoom 0.25 / 1.0 / 2.0:
+  smooth curves, three clearly distinct lines, ghosts staying next to the
+  ship. **Open item for Matthew:** the magenta retro ghost deviates only
+  ~3 px at zoom 0.25 (12.5 px at 1.0), because retro genuinely is a tenth
+  of forward thrust. No single tap length fixes both ends of a 10:1
+  ratio. Left honest; if it needs to read at low zoom the options are a
+  bigger `THRUST_PREVIEW_BURN_SECONDS` (both ghosts grow) or a separate
+  retro multiplier (ghosts then show different tap lengths, which needs a
+  clearer HUD label).
 - **Measurement worth flagging to Matthew, unrelated to this feature:**
   on this box (Python 3.14 / pygame-ce 2.5.7) the *existing* cyan
   predict costs ~57 ms per refresh, i.e. ~19 ms/frame amortized, which

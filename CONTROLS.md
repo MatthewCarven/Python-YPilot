@@ -85,7 +85,16 @@ Each ghost is capped with a small dot at its far end — where the three
 lines run bundled near the ship, three distinct tips are the clearest
 signal that there really are three paths and not one fringed one.
 
-The HUD gains a `THRUST PEEK` line with the exact Δv each tap delivers.
+The ghosts look **5 seconds** ahead, not the full cyan predict horizon.
+That is deliberate: over 5 s a tap reads as the small clean deviation it
+actually is, and the ghost stays beside the cyan line and on screen at
+any zoom. Extrapolated over the full 30 s the same tap flings the
+forward ghost into a visibly different orbit and off the top of the
+screen, which reads as an enormous burn. `THRUST_PREVIEW_SECONDS` is the
+knob if you want to see further.
+
+The HUD gains a `THRUST PEEK` line with the exact Δv each tap delivers
+and how far ahead the ghosts look.
 If Tab is held but the overlay can't run, that line says so and why
 (`landed`, `build menu open`, `ship destroyed`) rather than showing
 nothing — holding a key and getting silence is indistinguishable from
@@ -119,6 +128,9 @@ Notes:
   one. The visible cost is that a ghost lags the nose by up to ~9° while
   you sweep it hard; it snaps true the moment you stop turning.
 - Costs nothing at all when Tab isn't held.
+- Expect the magenta retro ghost to hug the cyan line closely when
+  zoomed out — at a tenth of forward thrust it genuinely deviates about
+  a tenth as much. Zoom in to read it.
 - The ghosts draw **on top of** the cyan prediction. They were underneath
   in the first cut, and the cyan ribbon painted over the retro ghost
   wherever the two ran close — which, at a tenth of forward thrust, is
