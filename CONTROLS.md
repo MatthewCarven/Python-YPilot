@@ -78,10 +78,18 @@ ship alongside the cyan prediction:
 
 | Ghost | Colour | Shows |
 |---|---|---|
-| **W / Up** | dim green | Path after a 0.1 s forward tap |
-| **S / Down** | dim magenta | Path after a 0.1 s retro tap |
+| **W / Up** | green | Path after a 0.1 s forward tap |
+| **S / Down** | magenta | Path after a 0.1 s retro tap |
+
+Each ghost is capped with a small dot at its far end — where the three
+lines run bundled near the ship, three distinct tips are the clearest
+signal that there really are three paths and not one fringed one.
 
 The HUD gains a `THRUST PEEK` line with the exact Δv each tap delivers.
+If Tab is held but the overlay can't run, that line says so and why
+(`landed`, `build menu open`, `ship destroyed`) rather than showing
+nothing — holding a key and getting silence is indistinguishable from
+the key not registering.
 
 The overlay **honours the live trim ladder**, so `Shift+Tab` previews
 the 5× boost tap and `Ctrl+Tab` the 1 % precision tap — the ghost can
@@ -111,6 +119,10 @@ Notes:
   one. The visible cost is that a ghost lags the nose by up to ~9° while
   you sweep it hard; it snaps true the moment you stop turning.
 - Costs nothing at all when Tab isn't held.
+- The ghosts draw **on top of** the cyan prediction. They were underneath
+  in the first cut, and the cyan ribbon painted over the retro ghost
+  wherever the two ran close — which, at a tenth of forward thrust, is
+  most of the visible trajectory.
 
 ## Strafe (Q / E)
 

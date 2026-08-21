@@ -452,7 +452,16 @@ SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 # thing the overlay teaches: forward runs at full SHIP_THRUST while retro
 # runs at RETRO_THRUST_SCALE (10%), so the S ghost sits ~10x closer to the
 # cyan line than the W ghost does.
-THRUST_PREVIEW_BURN_SECONDS = 0.1    # tap length modelled by the ghosts
+# Tap length modelled by the ghosts. 0.1 s survived a scare: the overlay
+# failed its first playtest with "couldn't distinguish a second or third
+# line", and the tap length was the obvious suspect. It was not the cause --
+# the ghosts were 1 px, dim, and drawn *underneath* the cyan ribbon, which
+# painted straight over them wherever the two ran close (which the retro
+# ghost always does, being a tenth of forward thrust). With the draw order,
+# width and palette fixed, 0.1 s separates cleanly at every play zoom, and
+# it stays the most informative value: longer taps throw the forward ghost
+# off-screen within a few seconds, so you lose the shape of the new orbit.
+THRUST_PREVIEW_BURN_SECONDS = 0.1
 # Step budget per ghost. Far coarser than PREDICT_TARGET_STEPS on purpose --
 # the overlay only has to show *how far off the cyan line* the tap puts you,
 # which is a gross displacement, not a precision forecast. Measured endpoint
@@ -465,8 +474,14 @@ THRUST_PREVIEW_BURN_SECONDS = 0.1    # tap length modelled by the ghosts
 # costing a third of what 400 did. Raise it if the ghosts ever look kinked.
 THRUST_PREVIEW_TARGET_STEPS = 150
 THRUST_PREVIEW_STRIDE = 8            # coarser than PREDICT_DRAW_STRIDE (6)
-THRUST_PREVIEW_FWD_COLOR = (80, 210, 120)    # dim green   -- W / Up ghost
-THRUST_PREVIEW_RETRO_COLOR = (210, 90, 200)  # dim magenta -- S / Down ghost
+# 2 px, not 1. A 1 px ghost beside the cyan line's 1-3 px ribbon reads as a
+# fringe on the cyan line rather than a line of its own, especially where
+# the two run within a few pixels of each other near the ship.
+THRUST_PREVIEW_WIDTH = 2
+# Bright, not dim. These sit on a near-black background at 2 px and have to
+# survive being crossed by the cyan ribbon and the orbit-path dashes.
+THRUST_PREVIEW_FWD_COLOR = (120, 255, 140)    # green   -- W / Up ghost
+THRUST_PREVIEW_RETRO_COLOR = (255, 120, 240)  # magenta -- S / Down ghost
 
 # --- Plan-mode (pause + what-if overlay) -----------------------------------
 # Spacebar pauses the world (bodies, ship, enemies, bullets, fuel all freeze).
@@ -3084,11 +3099,18 @@ def draw_thrust_preview(surf: pygame.Surface, camera: Camera,
             continue
         screen_pts = [camera.world_to_screen_int(pts[i])
                       for i in range(0, len(pts), THRUST_PREVIEW_STRIDE)]
+        if (len(pts) - 1) % THRUST_PREVIEW_STRIDE:
+            screen_pts.append(camera.world_to_screen_int(pts[-1]))
         if len(screen_pts) >= 2:
-            # Flat 1 px, no chaos-cone thickness ramp: the ghost is a
+            # Flat width, no chaos-cone thickness ramp: the ghost is a
             # comparison aid against the cyan line, not a forecast in its
             # own right, so it should never out-shout the real prediction.
-            pygame.draw.lines(surf, color, False, screen_pts, 1)
+            pygame.draw.lines(surf, color, False, screen_pts,
+                              THRUST_PREVIEW_WIDTH)
+            # Pip on the far end. Where the three lines run bundled near the
+            # ship, three distinct tips are the clearest signal that there
+            # really are three paths and not one fringed one.
+            pygame.draw.circle(surf, color, screen_pts[-1], 3)
 
 
 def draw_mining_beam(surf: pygame.Surface, camera: Camera, ship_pos: Vector2, target: Deposit) -> None:
@@ -3140,6 +3162,7 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              sim_time: float = 0.0,
              time_scale: float = 1.0,
              thrust_preview_dv: tuple[float, float] | None = None,
+             thrust_preview_blocked: str | None = None,
              universe_spec: dict | None = None) -> None:
     if ship.alive:
         # Anchor altitude / rel-speed / v_circ to whichever landable body is
@@ -3291,6 +3314,9 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
                 f"THRUST PEEK  {THRUST_PREVIEW_BURN_SECONDS:.2f}s tap:"
                 f"   W {fwd_dv:+7.2f} dv      S {retro_dv:+7.2f} dv"
             )
+        elif thrust_preview_blocked is not None:
+            lines.append("")
+            lines.append(f"THRUST PEEK  unavailable: {thrust_preview_blocked}")
         lines += [
             "",
             "Mouse aim  W/S/Shift/Ctrl thrust  Tab thrust peek  H brake  J path-hold  B build",
@@ -5315,39 +5341,48 @@ def main() -> None:
                 if d2 < best_d2:
                     best_d2 = d2
                     ca_target = b
-        # Thrust-preview peek (hold Tab). Drawn BEFORE the cyan predict so
-        # the real forecast layers on top and stays the dominant line --
-        # the ghosts are a comparison aid, not the headline. Gated on the
-        # same conditions as the cyan line (alive, airborne, not in the
-        # build menu), plus the seed prompt, which swallows typing.
+        # Thrust-preview peek (hold Tab). Computed here but DRAWN after the
+        # cyan predict below -- the first cut drew it underneath, and where
+        # a ghost runs within a few pixels of the cyan line (which the retro
+        # ghost always does, being a tenth of forward thrust) the cyan
+        # ribbon simply painted over it. On top the ghosts stay legible;
+        # they are thin and flat-shaded enough not to out-shout the real
+        # forecast.
+        #
+        # thrust_preview_blocked carries the reason when Tab is down but the
+        # overlay can't run. Holding a key and getting *nothing* -- no line,
+        # no message -- is indistinguishable from the key not registering at
+        # all, which is exactly how this feature failed its first playtest.
         thrust_preview_dv: tuple[float, float] | None = None
-        peeking = bool(
-            keys[pygame.K_TAB] and ship.alive and not ship.landed
-            and not in_build_mode and not seed_prompt_active
-        )
-        if peeking:
-            fwd_scale = forward_thrust_scale(mods)
-            retro_scale_now = retro_thrust_scale(mods)
-            preview_key = (fwd_scale, retro_scale_now, predict_seconds,
-                           len(ship.pending_maneuvers))
-            if (thrust_preview_cache["age"] >= PREDICT_CACHE_INTERVAL
-                    or thrust_preview_cache["key"] != preview_key):
-                thrust_preview_cache["paths"] = compute_thrust_preview(
-                    ship, bodies, sim_time, mods, predict_seconds
-                )
-                thrust_preview_cache["age"] = 0
-                thrust_preview_cache["key"] = preview_key
+        thrust_preview_blocked: str | None = None
+        thrust_preview_paths: list | None = None
+        if keys[pygame.K_TAB] and not seed_prompt_active:
+            if not ship.alive:
+                thrust_preview_blocked = "ship destroyed"
+            elif ship.landed:
+                thrust_preview_blocked = "landed -- use Space plan mode instead"
+            elif in_build_mode:
+                thrust_preview_blocked = "build menu open"
             else:
-                thrust_preview_cache["age"] += 1
-            # Draw every frame even on a cache replay: the camera keeps
-            # moving, so the world->screen projection has to be redone or
-            # the ghosts would stutter against everything else on screen.
-            draw_thrust_preview(screen, camera, thrust_preview_cache["paths"])
-            thrust_preview_dv = (
-                SHIP_THRUST * fwd_scale * THRUST_PREVIEW_BURN_SECONDS,
-                -SHIP_THRUST * retro_scale_now * THRUST_PREVIEW_BURN_SECONDS,
-            )
-        else:
+                fwd_scale = forward_thrust_scale(mods)
+                retro_scale_now = retro_thrust_scale(mods)
+                preview_key = (fwd_scale, retro_scale_now, predict_seconds,
+                               len(ship.pending_maneuvers))
+                if (thrust_preview_cache["age"] >= PREDICT_CACHE_INTERVAL
+                        or thrust_preview_cache["key"] != preview_key):
+                    thrust_preview_cache["paths"] = compute_thrust_preview(
+                        ship, bodies, sim_time, mods, predict_seconds
+                    )
+                    thrust_preview_cache["age"] = 0
+                    thrust_preview_cache["key"] = preview_key
+                else:
+                    thrust_preview_cache["age"] += 1
+                thrust_preview_paths = thrust_preview_cache["paths"]
+                thrust_preview_dv = (
+                    SHIP_THRUST * fwd_scale * THRUST_PREVIEW_BURN_SECONDS,
+                    -SHIP_THRUST * retro_scale_now * THRUST_PREVIEW_BURN_SECONDS,
+                )
+        if thrust_preview_paths is None:
             # Force a refresh on the next press so frame 1 of a peek is
             # never a stale path from an old ship state.
             thrust_preview_cache["age"] = PREDICT_CACHE_INTERVAL
@@ -5479,6 +5514,13 @@ def main() -> None:
                 # apsis dots. No-op when burn_indices is empty.
                 draw_chain_burn_markers(screen, camera, cached_traj,
                                         predict_cache["burn_indices"], font)
+
+        # Ghosts go on last of the predictor layers (see the note where they
+        # are computed). Redrawn every frame even on a cache replay: the
+        # camera keeps moving, so the world->screen projection has to be
+        # redone or the ghosts would stutter against everything else.
+        if thrust_preview_paths is not None:
+            draw_thrust_preview(screen, camera, thrust_preview_paths)
 
         # Plan-mode "what-if" overlay: walk the predictor through the full
         # maneuver chain (queued burns + the current preview burn), drawing
@@ -5624,6 +5666,7 @@ def main() -> None:
                      sim_time=sim_time,
                      time_scale=time_scale,
                      thrust_preview_dv=thrust_preview_dv,
+                     thrust_preview_blocked=thrust_preview_blocked,
                      universe_spec=current_universe)
 
         if in_build_mode:

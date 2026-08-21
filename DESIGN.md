@@ -326,6 +326,19 @@ retro. See [CONTROLS.md](CONTROLS.md) for the player-facing description.
 
 Design notes:
 
+- **Drawn above the cyan line, at 2 px, in bright green/magenta.** All
+  three of those are corrections from the first cut, which shipped 1 px
+  dim ghosts *under* the cyan ribbon and consequently failed playtest
+  with "couldn't distinguish a second or third line". The retro ghost
+  runs within a few pixels of the cyan line for most of the visible
+  trajectory (it is a tenth of forward thrust), so anything drawn
+  underneath it is simply painted over. Endpoint pips give three
+  distinct tips even where the lines bundle near the ship.
+- **Holding Tab always produces HUD feedback**, including when the
+  overlay is suppressed (landed / destroyed / build menu), which reports
+  the reason. Silence on a keypress is indistinguishable from the key
+  not registering, and that ambiguity is what made the first playtest
+  failure hard to diagnose.
 - **A held peek, not an always-on overlay.** Three lines fanning out of
   one point is permanent clutter, and the ghosts only matter in the
   moment *before* you commit — once W is down you are already flying it.
@@ -345,6 +358,10 @@ Design notes:
   against S's `-2.2` and the green ghost fans ~8× further. The HUD's
   `THRUST PEEK` line prints both numbers because that ratio is the least
   obvious thing about the overlay.
+- **0.1 s is the right tap length**, despite being the prime suspect when
+  the overlay failed playtest. Longer taps (0.5 s → 110 Δv) throw the
+  forward ghost off-screen within a few seconds, so you lose the shape of
+  the resulting orbit — the thing the overlay exists to show.
 - **Modelled as an impulse at `t=0`** (`vel0 = ship.vel ± dv`) rather
   than a held thrust across the first few steps. Over 0.1 s the
   difference is far below a pixel, and it keeps the ghost identical in
@@ -856,6 +873,7 @@ tweaked by feel:
 | `THRUST_PREVIEW_BURN_SECONDS` | 0.1 | Tap length the Tab ghosts model |
 | `THRUST_PREVIEW_TARGET_STEPS` | 150 | Step budget per ghost; 2.8% endpoint error worst case. Raise if ghosts look kinked |
 | `THRUST_PREVIEW_STRIDE` | 8 | Draw stride for ghosts (coarser than `PREDICT_DRAW_STRIDE`) |
+| `THRUST_PREVIEW_WIDTH` | 2 | Ghost line width. 1 px reads as a fringe on the cyan line, not a line of its own |
 | `PREDICT_TICK_HALFLEN` | 5 px | Tick half-length, screen-space (zoom-invariant) |
 | `TIME_SCALE_MIN/MAX` | 1/16 / 16 | F7/F8 clamps |
 

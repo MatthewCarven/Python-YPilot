@@ -42,16 +42,23 @@ In flight: the **gameplay-elements arc** (planned with Matthew
   ladder (`Shift+Tab` = boost tap, `Ctrl+Tab` = precision tap) via new
   shared `forward_thrust_scale` / `retro_thrust_scale` helpers. Docs in
   CONTROLS.md + DESIGN.md. **Headless-tested only -- needs playtest.**
-  Feel questions for the field run: (a) is Tab the right key, or does it
-  want to be something the left hand can hold while WASD-ing? (b) are
-  the ghost colours readable against the cyan line and the starfield, or
-  do they need to be dimmer/brighter? (c) is the ~9 deg ghost lag while
-  sweeping the nose noticeable enough to be annoying -- if so, drop
-  `PREDICT_CACHE_INTERVAL` or add `ship.angle` to the preview cache key
-  and eat the cost? (d) does the 0.1 s tap length feel like the right
-  unit, or would 0.25 s read better? Knobs:
+  **Visibility fixed 2026-08-21 after playtest #1** reported no
+  distinguishable lines: ghosts now draw *above* the cyan predict (they
+  were underneath and being painted over), at 2 px instead of 1, in a
+  brighter palette, with endpoint pips. Tap length stays 0.1 s -- it was
+  the prime suspect and was not the cause. Holding Tab now always
+  produces a HUD line, including `unavailable: <reason>` when
+  suppressed, so a dead key is distinguishable from a suppressed one.
+  Remaining feel questions for playtest #2: (a) is Tab the right key, or
+  does it want to be something the left hand can hold while WASD-ing?
+  (b) is the ~9 deg ghost lag while sweeping the nose noticeable enough
+  to annoy -- if so, drop `PREDICT_CACHE_INTERVAL` or add `ship.angle`
+  to the preview cache key and eat the cost? (c) do the ghosts want to
+  stop at a shorter horizon than the cyan line, so they stay on screen
+  when zoomed in? Knobs:
   `THRUST_PREVIEW_BURN_SECONDS`, `THRUST_PREVIEW_TARGET_STEPS`,
-  `THRUST_PREVIEW_STRIDE`, the two `THRUST_PREVIEW_*_COLOR`s.
+  `THRUST_PREVIEW_STRIDE`, `THRUST_PREVIEW_WIDTH`, the two
+  `THRUST_PREVIEW_*_COLOR`s.
 - **Surfaced 2026-08-21, not started: predictor cost.** The cyan predict
   measures ~57 ms/refresh (~19 ms/frame amortized) on the dev box --
   already over the 16.7 ms 60 FPS budget by itself. `predict_trajectory`

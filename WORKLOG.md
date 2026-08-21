@@ -84,6 +84,43 @@
   untouched; `ship.angle` is deliberately *not* in the key (including it
   refreshes every frame during a turn, the expensive case) at the price
   of up to 3 frames / ~9 deg of ghost lag while sweeping the nose.
+- **Thrust ghosts failed their first playtest -- "couldn't distinguish a
+  second or 3rd line anywhere" -- and the cause was rendering, not the
+  0.1 s tap length.** Matthew's own guess was the tap being too short;
+  that turned out to be wrong, and worth recording because it was a
+  convincing wrong answer. Diagnosis was done by rendering real frames
+  headless to PNG (`SDL_VIDEODRIVER=dummy` + `pygame.image.save`) and
+  looking at them, which is a much better tool for "is this visible?"
+  than any amount of reading the code. Three faults, all in the draw:
+  1. **Ghosts were drawn *underneath* the cyan predict.** The retro
+     ghost runs 2-12 px from the cyan line across the whole visible
+     trajectory (it is a tenth of forward thrust), and the cyan ribbon
+     is 1-3 px wide -- so it painted straight over the magenta line.
+     Ghosts now draw after the cyan block. The compute still happens in
+     the old spot; only the draw call moved.
+  2. **1 px was too thin.** Beside the cyan ribbon a 1 px ghost reads as
+     colour fringing on the cyan line rather than a line of its own.
+     Now `THRUST_PREVIEW_WIDTH = 2`.
+  3. **The palette was too dim** for 1-2 px on a near-black field --
+     (80,210,120)/(210,90,200) -> (120,255,140)/(255,120,240).
+  Also added endpoint pips, so where the lines bundle near the ship you
+  can still see three distinct tips.
+- **Tap length reverted to 0.1 s after a detour to 0.5 s.** With the draw
+  fixed, rendered comparison sheets at 0.10 / 0.25 / 0.50 s show 0.1 s is
+  not merely adequate but *best*: at 0.5 s (110 dv) the forward ghost
+  leaves the frame within a couple of seconds, so you lose the shape of
+  the orbit it puts you in, which is the whole point of the overlay.
+- **Added an always-on feedback path for the peek key.** Holding Tab now
+  always produces a HUD line: either the dv readout, or
+  `THRUST PEEK unavailable: <reason>` (landed / build menu open / ship
+  destroyed). Previously a suppressed peek drew and said nothing, which
+  is indistinguishable from Tab not registering at all -- and that
+  ambiguity is precisely what made this playtest report hard to act on.
+  Worth generalising: any held-key overlay should say why it is doing
+  nothing.
+- Verified by rendering at the default start state at zoom 0.25, 1.0 and
+  2.0: three clearly separated lines at all three. **Still not played in
+  a real window by me** -- Matthew's next run is the real test.
 - **Measurement worth flagging to Matthew, unrelated to this feature:**
   on this box (Python 3.14 / pygame-ce 2.5.7) the *existing* cyan
   predict costs ~57 ms per refresh, i.e. ~19 ms/frame amortized, which
