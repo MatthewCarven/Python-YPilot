@@ -47,6 +47,59 @@
   display in this session. Worth a field check that the AA telegraph
   still reads smoothly and that dodging still drops the lock (Shift+F10
   toggles batteries).
+- **Built: thrust-preview ghosts (hold Tab).** Matthew picked the
+  two-fixed-0.1s-ghosts option over the single-scalable-ghost
+  alternative. Dim green = a 0.1 s W tap, dim magenta = a 0.1 s S tap,
+  drawn *before* the cyan predict so the real forecast stays the
+  dominant line. HUD gains a `THRUST PEEK` line with both dv numbers.
+  New `compute_thrust_preview` / `draw_thrust_preview` pair; bound to
+  held `K_TAB`, gated on alive + airborne + not-in-build-menu + not
+  seed-prompt.
+- **Refactor that fell out of it: the thrust trim ladders are now a
+  single source of truth.** Lifted the Shift/Ctrl/Ctrl+Shift ladders out
+  of `Ship._read_thrust_input` into module-level `forward_thrust_scale`
+  / `retro_thrust_scale`. Both the live input path and the overlay call
+  them, so the ghost can't preview a scale the key wouldn't apply -- and
+  `Shift+Tab` / `Ctrl+Tab` preview the boost and precision taps for
+  free. Verified headless that all four rungs of both ladders still
+  produce identical `thrust_scale` / `retro_scale` through the live
+  reader.
+- **The retro asymmetry is worth knowing about**: forward runs at full
+  `SHIP_THRUST`, retro at `RETRO_THRUST_SCALE` (10%), so a nominal W tap
+  is +22.0 dv against S's -2.2 and the green ghost fans ~8x further off
+  the cyan line. This was NOT what the original pitch assumed (it
+  reasoned about a symmetric 22 u/s both ways). Left honest rather than
+  normalised, and the HUD prints both numbers because that ratio is the
+  least obvious thing on screen.
+- **Perf work this needed -- the first cut was too expensive.** At the
+  originally-proposed 400 steps, computing both ghosts fresh every frame
+  measured **25 ms/frame**, against a 16.7 ms budget at 60 FPS. Fixed in
+  two moves: dropped to `THRUST_PREVIEW_TARGET_STEPS = 150` (chosen from
+  measured endpoint error vs a full `dt = PHYSICS_DT` reference -- worst
+  case low fast orbit: 60 steps = 8.5% of the fan, 100 = 4.5%, 150 =
+  2.8%, 200 = 2.0%), and gave the ghosts their own cache on the existing
+  `PREDICT_CACHE_INTERVAL` cadence. Final: **~3.5 ms/frame while held**,
+  ~18% on top of the cyan line. Cache is a separate dict from
+  `predict_cache` so the cyan line's invalidation conditions stay
+  untouched; `ship.angle` is deliberately *not* in the key (including it
+  refreshes every frame during a turn, the expensive case) at the price
+  of up to 3 frames / ~9 deg of ghost lag while sweeping the nose.
+- **Measurement worth flagging to Matthew, unrelated to this feature:**
+  on this box (Python 3.14 / pygame-ce 2.5.7) the *existing* cyan
+  predict costs ~57 ms per refresh, i.e. ~19 ms/frame amortized, which
+  already exceeds the 16.7 ms 60 FPS budget on its own. Root cause is
+  `predict_trajectory` doing ~15 `Body.position_at` evaluations per step
+  (2x `gravity_at_t` over every body plus the collision sweep), each
+  recursive + trig, at ~32 us/step for 1800 steps. Not touched this
+  session -- it's a real optimisation (share one body-position sample
+  per timestep across all three trajectories) but it lands squarely on
+  the invariants in PROGRAM_FLOW.md, so it wants its own session.
+- Headless-verified: both ghosts render in their own colours, 151
+  samples each, W-fan/S-fan ratio 7.6:1, all four trim rungs feed
+  through to the drawn path, `draw_hud` renders the new line at every dv
+  magnitude, and `compute_thrust_preview` on a landed ship returns
+  cleanly. **Still not playtested in a real window** -- no display this
+  session.
 - **Discussed, not built: live thrust-preview ghosts** -- HUD lines
   showing where you would end up if you held W or S for 0.1 s. Verdict
   and proposed shape recorded in TASKS.md; the short version is that

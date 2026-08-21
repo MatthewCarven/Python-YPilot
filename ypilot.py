@@ -440,6 +440,34 @@ APSIS_APO_COLOR = (140, 200, 255)    # cool blue: farther from body
 CLOSEST_APPROACH_COLOR = (210, 130, 240)  # magenta diamond: nearest pass to non-anchor body
 SOI_CROSSING_COLOR = (220, 200, 90)  # gold ring: dominant gravity changes here
 
+# --- Thrust-preview peek (hold Tab) ----------------------------------------
+# Two faint ghost trajectories showing where a short tap of W or S would put
+# you, so you can judge a nudge *before* committing to it. Deliberately a
+# held peek rather than an always-on overlay: three lines fanning out of one
+# point is permanent clutter, and the ghosts only matter in the moment before
+# you commit -- once W is down you're already flying it. Costs nothing at all
+# when the key isn't held.
+#
+# The two ghosts are NOT symmetric, and that asymmetry is the most useful
+# thing the overlay teaches: forward runs at full SHIP_THRUST while retro
+# runs at RETRO_THRUST_SCALE (10%), so the S ghost sits ~10x closer to the
+# cyan line than the W ghost does.
+THRUST_PREVIEW_BURN_SECONDS = 0.1    # tap length modelled by the ghosts
+# Step budget per ghost. Far coarser than PREDICT_TARGET_STEPS on purpose --
+# the overlay only has to show *how far off the cyan line* the tap puts you,
+# which is a gross displacement, not a precision forecast. Measured endpoint
+# error against a full dt=PHYSICS_DT reference, worst case (low fast orbit,
+# ~400 u altitude, where the fan is ~1700 u):
+#     60 steps -> 8.5% of the fan     150 steps -> 2.8%
+#    100 steps -> 4.5%                200 steps -> 2.0%
+# An order of magnitude better in higher/slower orbits (0.4% at 150). 150 is
+# the knee: visually indistinguishable from the reference at play zooms while
+# costing a third of what 400 did. Raise it if the ghosts ever look kinked.
+THRUST_PREVIEW_TARGET_STEPS = 150
+THRUST_PREVIEW_STRIDE = 8            # coarser than PREDICT_DRAW_STRIDE (6)
+THRUST_PREVIEW_FWD_COLOR = (80, 210, 120)    # dim green   -- W / Up ghost
+THRUST_PREVIEW_RETRO_COLOR = (210, 90, 200)  # dim magenta -- S / Down ghost
+
 # --- Plan-mode (pause + what-if overlay) -----------------------------------
 # Spacebar pauses the world (bodies, ship, enemies, bullets, fuel all freeze).
 # While paused, the mouse aims a burn direction and `[` / `]` shorten/lengthen
@@ -1836,6 +1864,44 @@ def roll_bonus_deposits(bodies: list[Body], starter: Body, destination: Body,
 # Ship
 # ============================================================================
 
+def forward_thrust_scale(mods: int) -> float:
+    """Forward (W / Up) thrust trim ladder:
+        plain       = 1.0                      (nominal)
+        Shift       = THRUST_BOOST_SCALE       (boost, for escape velocity)
+        Ctrl        = THRUST_PRECISION_SCALE   (precision)
+        Ctrl+Shift  = THRUST_FINE_SCALE        (extra-fine)
+
+    Module-level so the live input path (`Ship._read_thrust_input`) and the
+    Tab thrust-preview overlay read the ladder from one place -- otherwise
+    the ghost could quietly disagree with what the key actually does.
+    """
+    shift = bool(mods & pygame.KMOD_SHIFT)
+    ctrl  = bool(mods & pygame.KMOD_CTRL)
+    if ctrl and shift:
+        return THRUST_FINE_SCALE
+    if shift:
+        return THRUST_BOOST_SCALE
+    if ctrl:
+        return THRUST_PRECISION_SCALE
+    return 1.0
+
+
+def retro_thrust_scale(mods: int) -> float:
+    """Retro (S / Down) trim ladder. Mirrors forward_thrust_scale but has
+    no boost step -- plain and Shift both give RETRO_THRUST_SCALE:
+        plain/Shift = RETRO_THRUST_SCALE       (10% of forward)
+        Ctrl        = RETRO_PRECISION_SCALE    (1%)
+        Ctrl+Shift  = RETRO_FINE_SCALE         (0.1%)
+    """
+    shift = bool(mods & pygame.KMOD_SHIFT)
+    ctrl  = bool(mods & pygame.KMOD_CTRL)
+    if ctrl and shift:
+        return RETRO_FINE_SCALE
+    if ctrl:
+        return RETRO_PRECISION_SCALE
+    return RETRO_THRUST_SCALE
+
+
 class Ship:
     def __init__(self, planet: Body):
         self.reset(planet)
@@ -2162,37 +2228,19 @@ class Ship:
         self.strafing_left = False
         self.strafing_right = False
 
-        # Forward thrust trim ladder:
-        #   plain         = 1.0         (nominal)
-        #   Shift         = 5.0         (boost, for escape velocity)
-        #   Ctrl          = 0.01        (precision)
-        #   Ctrl+Shift    = 0.001       (extra-fine)
+        # Trim ladders live in forward_thrust_scale / retro_thrust_scale so
+        # the Tab thrust-preview overlay previews exactly what these keys
+        # will do. See those functions for the ladder tables.
         if forward_pressed:
             self.brake_assist = False
             self.path_hold = False
-            if ctrl and shift:
-                self.thrust_scale = THRUST_FINE_SCALE
-            elif shift:
-                self.thrust_scale = THRUST_BOOST_SCALE
-            elif ctrl:
-                self.thrust_scale = THRUST_PRECISION_SCALE
-            else:
-                self.thrust_scale = 1.0
+            self.thrust_scale = forward_thrust_scale(mods)
             self.thrusting = True
 
-        # Retro thrust trim ladder (mirrors forward, no boost step):
-        #   plain         = RETRO_THRUST_SCALE      (10%)
-        #   Ctrl          = RETRO_PRECISION_SCALE   (1%)
-        #   Ctrl+Shift    = RETRO_FINE_SCALE        (0.1%)
         if reverse_pressed:
             self.brake_assist = False
             self.path_hold = False
-            if ctrl and shift:
-                self.retro_scale = RETRO_FINE_SCALE
-            elif ctrl:
-                self.retro_scale = RETRO_PRECISION_SCALE
-            else:
-                self.retro_scale = RETRO_THRUST_SCALE
+            self.retro_scale = retro_thrust_scale(mods)
             self.retro_thrusting = True
 
         # Strafe does NOT cancel brake-assist. Forward and retro are
@@ -2986,6 +3034,63 @@ def draw_plan_trajectory(surf: pygame.Surface, camera: Camera,
         pygame.draw.circle(surf, color, ip, 2)
 
 
+def compute_thrust_preview(ship: "Ship", bodies: list[Body], sim_time: float,
+                           mods: int, seconds: float) -> list[list[Vector2]]:
+    """Held-peek overlay (Tab): predict where a THRUST_PREVIEW_BURN_SECONDS
+    tap of W (index 0) or S (index 1) would put you. Returns two point lists.
+
+    Deliberately **bare lines** -- no apsis / SOI / closest-approach markers,
+    no impact dot, no ticks. Those analyses are where the per-frame predictor
+    cost actually lives (each walks the whole point list against every body),
+    and three sets of markers on screen at once would be unreadable. What the
+    overlay is for is the *fan*: how far the tap throws you off the cyan line.
+
+    Honours the live trim ladder via forward_thrust_scale / retro_thrust_scale,
+    so Shift+Tab previews the boost tap and Ctrl+Tab the precision tap, and
+    the ghost can never disagree with what the key would actually do. Any
+    armed maneuver chain is folded in too, so the ghosts stay directly
+    comparable to the cyan line rather than forecasting a different future.
+
+    Modelled as an impulse at t=0 (`vel0 = ship.vel +/- dv`) rather than a
+    held thrust across the first few steps: over 0.1 s the difference is far
+    below a pixel, and it keeps the ghost identical in form to how plan mode
+    applies its burns.
+    """
+    forward_dir = Vector2(math.cos(ship.angle), math.sin(ship.angle))
+    paths = []
+    for scale, sign in ((forward_thrust_scale(mods), 1.0),
+                        (retro_thrust_scale(mods), -1.0)):
+        dv = forward_dir * (sign * SHIP_THRUST * scale
+                            * THRUST_PREVIEW_BURN_SECONDS)
+        pts, _, _ = ship.predict_trajectory(
+            bodies, sim_time, seconds=seconds,
+            vel0=ship.vel + dv,
+            target_steps=THRUST_PREVIEW_TARGET_STEPS,
+            pending_burns=ship.pending_maneuvers,
+        )
+        paths.append(pts)
+    return paths
+
+
+def draw_thrust_preview(surf: pygame.Surface, camera: Camera,
+                        paths: list[list[Vector2]]) -> None:
+    """Render the two paths from compute_thrust_preview. Kept separate from
+    the compute step so the paths can be cached across frames (see the
+    thrust_preview_cache in main) while the draw still runs every frame --
+    otherwise the ghosts would visibly stutter against a panning camera."""
+    for pts, color in zip(paths, (THRUST_PREVIEW_FWD_COLOR,
+                                  THRUST_PREVIEW_RETRO_COLOR)):
+        if len(pts) < 2:
+            continue
+        screen_pts = [camera.world_to_screen_int(pts[i])
+                      for i in range(0, len(pts), THRUST_PREVIEW_STRIDE)]
+        if len(screen_pts) >= 2:
+            # Flat 1 px, no chaos-cone thickness ramp: the ghost is a
+            # comparison aid against the cyan line, not a forecast in its
+            # own right, so it should never out-shout the real prediction.
+            pygame.draw.lines(surf, color, False, screen_pts, 1)
+
+
 def draw_mining_beam(surf: pygame.Surface, camera: Camera, ship_pos: Vector2, target: Deposit) -> None:
     sp = camera.world_to_screen_int(ship_pos)
     dp = camera.world_to_screen_int(target.pos)
@@ -3034,6 +3139,7 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
              plan_burn_offset: float = 0.0,
              sim_time: float = 0.0,
              time_scale: float = 1.0,
+             thrust_preview_dv: tuple[float, float] | None = None,
              universe_spec: dict | None = None) -> None:
     if ship.alive:
         # Anchor altitude / rel-speed / v_circ to whichever landable body is
@@ -3174,9 +3280,20 @@ def draw_hud(surf: pygame.Surface, font: pygame.font.Font, ship: Ship,
                     f"  #{i + 1}  t+{remaining:6.2f}s   "
                     f"{dur:+6.3f}s ({dv:5.1f} dv)   @ {angle_deg:+4.0f}°"
                 )
+        # Only while Tab is held. The numbers are the point of the readout:
+        # the 10:1 forward-to-retro asymmetry is the least obvious thing
+        # about the two ghosts, and seeing 22.0 next to 2.2 teaches it
+        # faster than any amount of staring at the lines.
+        if thrust_preview_dv is not None:
+            fwd_dv, retro_dv = thrust_preview_dv
+            lines.append("")
+            lines.append(
+                f"THRUST PEEK  {THRUST_PREVIEW_BURN_SECONDS:.2f}s tap:"
+                f"   W {fwd_dv:+7.2f} dv      S {retro_dv:+7.2f} dv"
+            )
         lines += [
             "",
-            "Mouse aim  W/S/Shift/Ctrl thrust  H brake  J path-hold  B build",
+            "Mouse aim  W/S/Shift/Ctrl thrust  Tab thrust peek  H brake  J path-hold  B build",
             "+/- zoom  0 reset zoom  / shorter * longer predict  F5/F6 steps  F7/F8 time x0.5/x2",
             "Space pause+plan   [ ] burn duration   N queue chain   Backspace pop",
             "F11 fullscreen  R reset world  Esc quit",
@@ -4239,6 +4356,27 @@ def main() -> None:
         "peri_alt": None, "apo_alt": None, "ca_alt": None,
     }
 
+    # Tab thrust-preview cache. Separate dict rather than extra keys on
+    # predict_cache so the cyan line's refresh conditions -- which several
+    # HUD readouts and marker layers depend on -- stay untouched. Same
+    # PREDICT_CACHE_INTERVAL cadence, so the ghosts and the cyan line go
+    # stale and refresh together and therefore always move as one picture.
+    # Cost note: at THRUST_PREVIEW_TARGET_STEPS the two ghosts run ~9 ms
+    # per refresh on the dev box, which uncached would have been a bigger
+    # per-frame bill than the cyan line itself. Amortized it is ~3 ms.
+    # "key" holds the inputs that must force an early refresh: the peek
+    # key going down (so frame 1 of a peek is never blank) and the trim
+    # ladder changing under Shift/Ctrl (so the ghost never previews the
+    # wrong thrust scale). Ship angle is deliberately NOT in the key --
+    # including it would refresh every frame during a turn, which is the
+    # expensive case; the cost is up to PREDICT_CACHE_INTERVAL frames of
+    # ghost lag while you sweep the nose (~9 deg at SHIP_TURN_RATE).
+    thrust_preview_cache: dict = {
+        "age": PREDICT_CACHE_INTERVAL,
+        "key": None,
+        "paths": [],
+    }
+
     # Save / load helpers. Capture every world+state local via nonlocal so
     # the F-key handlers can be reduced to a single call regardless of slot.
     # Slot 0 == legacy single-slot quicksave (F2/F3 plain). Slots 1-9 are
@@ -5177,6 +5315,44 @@ def main() -> None:
                 if d2 < best_d2:
                     best_d2 = d2
                     ca_target = b
+        # Thrust-preview peek (hold Tab). Drawn BEFORE the cyan predict so
+        # the real forecast layers on top and stays the dominant line --
+        # the ghosts are a comparison aid, not the headline. Gated on the
+        # same conditions as the cyan line (alive, airborne, not in the
+        # build menu), plus the seed prompt, which swallows typing.
+        thrust_preview_dv: tuple[float, float] | None = None
+        peeking = bool(
+            keys[pygame.K_TAB] and ship.alive and not ship.landed
+            and not in_build_mode and not seed_prompt_active
+        )
+        if peeking:
+            fwd_scale = forward_thrust_scale(mods)
+            retro_scale_now = retro_thrust_scale(mods)
+            preview_key = (fwd_scale, retro_scale_now, predict_seconds,
+                           len(ship.pending_maneuvers))
+            if (thrust_preview_cache["age"] >= PREDICT_CACHE_INTERVAL
+                    or thrust_preview_cache["key"] != preview_key):
+                thrust_preview_cache["paths"] = compute_thrust_preview(
+                    ship, bodies, sim_time, mods, predict_seconds
+                )
+                thrust_preview_cache["age"] = 0
+                thrust_preview_cache["key"] = preview_key
+            else:
+                thrust_preview_cache["age"] += 1
+            # Draw every frame even on a cache replay: the camera keeps
+            # moving, so the world->screen projection has to be redone or
+            # the ghosts would stutter against everything else on screen.
+            draw_thrust_preview(screen, camera, thrust_preview_cache["paths"])
+            thrust_preview_dv = (
+                SHIP_THRUST * fwd_scale * THRUST_PREVIEW_BURN_SECONDS,
+                -SHIP_THRUST * retro_scale_now * THRUST_PREVIEW_BURN_SECONDS,
+            )
+        else:
+            # Force a refresh on the next press so frame 1 of a peek is
+            # never a stale path from an old ship state.
+            thrust_preview_cache["age"] = PREDICT_CACHE_INTERVAL
+            thrust_preview_cache["key"] = None
+
         live_peri_alt: float | None = None
         live_apo_alt: float | None = None
         live_ca_alt: float | None = None
@@ -5447,6 +5623,7 @@ def main() -> None:
                      plan_burn_offset=plan_burn_offset,
                      sim_time=sim_time,
                      time_scale=time_scale,
+                     thrust_preview_dv=thrust_preview_dv,
                      universe_spec=current_universe)
 
         if in_build_mode:

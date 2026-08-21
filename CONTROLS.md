@@ -70,6 +70,48 @@ Mirrors the forward ladder, no boost step (retro maxes at 10 %):
 
 Pressing S also cancels brake-assist and path-hold.
 
+## Thrust preview (hold Tab)
+
+Hold **Tab** to peek at where a **0.1 s tap** of W or S would put you,
+without committing to it. Two faint ghost trajectories fan out of the
+ship alongside the cyan prediction:
+
+| Ghost | Colour | Shows |
+|---|---|---|
+| **W / Up** | dim green | Path after a 0.1 s forward tap |
+| **S / Down** | dim magenta | Path after a 0.1 s retro tap |
+
+The HUD gains a `THRUST PEEK` line with the exact Δv each tap delivers.
+
+The overlay **honours the live trim ladder**, so `Shift+Tab` previews
+the 5× boost tap and `Ctrl+Tab` the 1 % precision tap — the ghost can
+never disagree with what the key would actually do. Any armed maneuver
+chain is folded in too, so the ghosts stay directly comparable to the
+cyan line.
+
+Expect the two ghosts to be **wildly asymmetric**, and that is the most
+useful thing the overlay teaches: forward runs at full `SHIP_THRUST`
+while retro runs at 10 % of it, so at nominal trim a W tap is `+22.0`
+Δv against a S tap's `-2.2`. The green ghost fans roughly 8× further off
+the cyan line than the magenta one.
+
+Deliberately **bare lines** — no apsis dots, SOI rings, closest-approach
+diamond or impact marker. Those analyses are where the predictor's
+per-frame cost actually lives, and three sets of markers at once would
+be unreadable. The point of the overlay is the *fan*, not a second full
+forecast.
+
+Notes:
+
+- Airborne only. While landed, use plan mode (Space) instead — it
+  handles the launch-pad bump correctly, which this overlay does not
+  try to.
+- The ghosts refresh on the same cadence as the cyan line
+  (`PREDICT_CACHE_INTERVAL`, 3 frames), so the whole picture moves as
+  one. The visible cost is that a ghost lags the nose by up to ~9° while
+  you sweep it hard; it snaps true the moment you stop turning.
+- Costs nothing at all when Tab isn't held.
+
 ## Strafe (Q / E)
 
 | Input | Effect |
@@ -282,6 +324,7 @@ want it.
 
 ```
 Mouse aim      A/D rotate          W/S thrust (Shift=5x, Ctrl=1%, Ctrl+Shift=0.1%)
+Tab (hold) thrust peek -- ghost paths for a 0.1s W / S tap (obeys the trim ladder)
 Arrows nudge cursor (Shift=fast, Ctrl=fine, Ctrl+Shift / Alt=pixel)
 Q/E strafe     H brake-assist      J path-hold     B (hold) build
 +/- zoom       0 reset zoom        / shorter pred  * longer pred

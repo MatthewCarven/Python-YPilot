@@ -35,33 +35,33 @@ In flight: the **gameplay-elements arc** (planned with Matthew
   questions at the bottom of that doc** (threat driver, repair model,
   raider-vs-ship lethality, wave targeting, hostile cap), and on the
   step-1 playtest verdict.
-- **Side idea (raised 2026-08-21, not started): live thrust-preview
-  ghosts.** Matthew's pitch: draw the path you *would* fly if you held
-  W or S for 0.1 s. Verdict -- worth having, but note plan mode already
-  is this feature (`PLAN_BURN_DURATION_DEFAULT` is literally `0.1`);
-  what's actually being asked for is plan mode *live and unpaused*,
-  locked to prograde/retro. Numbers check out: 0.1 s x `SHIP_THRUST`
-  220 = 22 u/s of dv, which fans the ghost ~660 units off the cyan line
-  over the default 30 s horizon (~110 units at the 5 s floor) -- clearly
-  legible, not a hairline. Proposed shape:
-  - **Held peek, not always-on.** Three lines fanning from one point is
-    permanent clutter, and the ghost only matters in the moment *before*
-    you commit -- once W is down you're already flying it. Bind to a held
-    modifier so it costs literally nothing when not asked for.
-  - **Bare lines only, no markers.** The SOI / apsis / closest-approach
-    walks are where the per-frame cost actually lives, and three sets of
-    dots would be unreadable. Dim green prograde, dim magenta retro,
-    thinner than the cyan.
-  - **Reuse the predictor verbatim**: two `predict_trajectory` calls with
-    `vel0 = ship.vel +/- heading * (SHIP_THRUST * 0.1)`, at a *reduced*
-    step budget (~400 steps is plenty for a visual delta -- it does not
-    need the full 6400), hung off the existing `predict_cache`
-    dirty-check so it rides the same 3-frame cadence.
-  - **Alternative worth deciding first**: a *single* ghost on the
-    existing modifier ladder (`[` / `]` with Shift/Ctrl/Alt scaling)
-    instead of two fixed-0.1 s ghosts -- same code, peek at 1 s or
-    0.01 s too, and consistent with how every other duration in the
-    game is tuned. **Needs Matthew's call on one-vs-two before coding.**
+- **Thrust-preview ghosts: SHIPPED 2026-08-21.** Hold Tab for two ghost
+  paths -- dim green = 0.1 s W tap, dim magenta = 0.1 s S tap -- plus a
+  `THRUST PEEK` HUD line with both dv numbers. Matthew chose two fixed
+  ghosts over the single-scalable-ghost alternative. Obeys the trim
+  ladder (`Shift+Tab` = boost tap, `Ctrl+Tab` = precision tap) via new
+  shared `forward_thrust_scale` / `retro_thrust_scale` helpers. Docs in
+  CONTROLS.md + DESIGN.md. **Headless-tested only -- needs playtest.**
+  Feel questions for the field run: (a) is Tab the right key, or does it
+  want to be something the left hand can hold while WASD-ing? (b) are
+  the ghost colours readable against the cyan line and the starfield, or
+  do they need to be dimmer/brighter? (c) is the ~9 deg ghost lag while
+  sweeping the nose noticeable enough to be annoying -- if so, drop
+  `PREDICT_CACHE_INTERVAL` or add `ship.angle` to the preview cache key
+  and eat the cost? (d) does the 0.1 s tap length feel like the right
+  unit, or would 0.25 s read better? Knobs:
+  `THRUST_PREVIEW_BURN_SECONDS`, `THRUST_PREVIEW_TARGET_STEPS`,
+  `THRUST_PREVIEW_STRIDE`, the two `THRUST_PREVIEW_*_COLOR`s.
+- **Surfaced 2026-08-21, not started: predictor cost.** The cyan predict
+  measures ~57 ms/refresh (~19 ms/frame amortized) on the dev box --
+  already over the 16.7 ms 60 FPS budget by itself. `predict_trajectory`
+  does ~15 `Body.position_at` evaluations per step (2x `gravity_at_t`
+  over every body + the collision sweep), each recursive + trig. The fix
+  is to sample every body's position *once* per timestep and share it
+  across the gravity calls, the collision check, and any other
+  trajectory being predicted that frame. Real win (~3x) but it lands on
+  PROGRAM_FLOW.md invariants 3 and 6, so it wants a session of its own
+  with a bit-equivalence check against the live integrator.
 - **Step 3 (undecided): harvester structure vs asteroid mining.**
   Harvester wants a renewable ore source to exist first (scrap from
   raids may be enough); asteroids are the skill-expression option.

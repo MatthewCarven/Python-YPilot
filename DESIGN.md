@@ -318,6 +318,60 @@ running. The trade-off when running is that the rendered trajectory's
 default time scale). Set `PREDICT_CACHE_INTERVAL = 1` to disable
 caching entirely.
 
+### Thrust preview (hold Tab)
+
+Two ghost trajectories showing where a `THRUST_PREVIEW_BURN_SECONDS =
+0.1 s` tap of W or S would put you — dim green forward, dim magenta
+retro. See [CONTROLS.md](CONTROLS.md) for the player-facing description.
+
+Design notes:
+
+- **A held peek, not an always-on overlay.** Three lines fanning out of
+  one point is permanent clutter, and the ghosts only matter in the
+  moment *before* you commit — once W is down you are already flying it.
+  Holding a key also makes the cost opt-in: zero when not asked for.
+- **Bare lines, no markers.** No apsis / SOI / closest-approach /
+  impact annotations. Those walks are where the predictor's per-frame
+  cost actually lives, and three sets of markers would be unreadable.
+  The overlay's job is the *fan*, not a second forecast.
+- **Trim ladder shared with the live input path.** The ladders moved out
+  of `Ship._read_thrust_input` into module-level `forward_thrust_scale`
+  / `retro_thrust_scale`, which both the input path and the overlay
+  call. Single source of truth, so the ghost cannot preview a scale the
+  key would not actually apply — and `Shift+Tab` / `Ctrl+Tab` preview
+  the boost and precision taps for free.
+- **The asymmetry is the feature.** Forward runs at full `SHIP_THRUST`,
+  retro at `RETRO_THRUST_SCALE` (10 %), so a nominal W tap is `+22.0` Δv
+  against S's `-2.2` and the green ghost fans ~8× further. The HUD's
+  `THRUST PEEK` line prints both numbers because that ratio is the least
+  obvious thing about the overlay.
+- **Modelled as an impulse at `t=0`** (`vel0 = ship.vel ± dv`) rather
+  than a held thrust across the first few steps. Over 0.1 s the
+  difference is far below a pixel, and it keeps the ghost identical in
+  form to how plan mode applies its burns.
+- **Airborne only.** Landed previews are plan mode's job — it already
+  mirrors the launch-pad bump into the snapshot (see *Predictor-snapshot
+  on commit*), and duplicating that here would buy nothing.
+
+Cost, measured on the dev box (default 5-body world, 30 s horizon):
+`THRUST_PREVIEW_TARGET_STEPS = 150` puts one refresh of both ghosts at
+~10 ms, which uncached would be a bigger per-frame bill than the cyan
+line itself. They therefore ride their own cache on the same
+`PREDICT_CACHE_INTERVAL` cadence — ~3.5 ms/frame all-in while held,
+about 18 % on top of the cyan line. The cache lives in a separate dict
+from `predict_cache` so the cyan line's invalidation conditions (which
+several HUD readouts depend on) stay untouched; its key holds the trim
+scales, horizon and pending-burn count, and **not** `ship.angle`, since
+including the angle would force a refresh every frame during a turn —
+the expensive case. The price is up to 3 frames of ghost lag (~9° at
+`SHIP_TURN_RATE`) while you sweep the nose hard.
+
+Step budget was chosen from measured endpoint error against a full
+`dt = PHYSICS_DT` reference, worst case being a low fast orbit where the
+fan is ~1700 u: 60 steps → 8.5 % of the fan, 100 → 4.5 %, **150 → 2.8 %**,
+200 → 2.0 %. An order of magnitude better in higher orbits. Raise the
+constant if the ghosts ever look kinked.
+
 ## Brake-assist autopilot
 
 `Ship._brake_assist_accel(pos, vel, bodies)` returns the desired
@@ -799,6 +853,9 @@ tweaked by feel:
 | `PREDICT_TARGET_STEPS_MAX` | 102 400 | F6 ceiling — past `PHYSICS_DT` clamp |
 | `PREDICT_CACHE_INTERVAL` | 3 | Frames between cyan-predict refreshes when running. 1 = no caching. |
 | `PREDICT_TICK_INTERVAL` | 5.0 s | Seconds between perpendicular tick marks |
+| `THRUST_PREVIEW_BURN_SECONDS` | 0.1 | Tap length the Tab ghosts model |
+| `THRUST_PREVIEW_TARGET_STEPS` | 150 | Step budget per ghost; 2.8% endpoint error worst case. Raise if ghosts look kinked |
+| `THRUST_PREVIEW_STRIDE` | 8 | Draw stride for ghosts (coarser than `PREDICT_DRAW_STRIDE`) |
 | `PREDICT_TICK_HALFLEN` | 5 px | Tick half-length, screen-space (zoom-invariant) |
 | `TIME_SCALE_MIN/MAX` | 1/16 / 16 | F7/F8 clamps |
 
