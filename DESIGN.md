@@ -509,11 +509,28 @@ Each battery has its own intercept solver:
    a hit point along the predicted path that a straight-line bullet
    could reach in the matching time. Up to `BATTERY_SOLVE_MAX_ITERS = 6`
    passes with `BATTERY_PREDICT_STEPS = 120` integration steps.
+
+   A **cheap squared-distance range gate runs before the predict**: a
+   solve can only succeed if the ship's predicted path enters
+   `BATTERY_RANGE` of where the battery sits right now, and the ship
+   can displace at most ~`speed × horizon` over the prediction window,
+   so anything beyond `BATTERY_RANGE + speed × horizon × 1.5` is
+   skipped outright. Conservative by construction — it only ever culls
+   solves that were already guaranteed to bail. Without it, *every*
+   battery in the system paid for a full 120-step predict every
+   0.25 s regardless of where the ship was.
 2. **Refuses to converge** while the ship is burning W or S. That's
    the dodge escape hatch — thrust breaks the lock by making the
    gravity-only predictor's path wrong.
 3. When the solver converges, paint a **targeting laser** at the
    predicted hit point for `BATTERY_LASER_DURATION = 1 s`, then fire.
+   While tracking, the battery re-solves every
+   `BATTERY_TRACK_SOLVE_INTERVAL = 0.05 s` (~20 Hz) rather than every
+   physics tick — `PlanetaryBattery.update` is driven from inside the
+   physics loop, so per-tick solving meant 60 full predicts a second
+   per locked-on battery. The aim point holds between solves; the
+   dodge escape at step 2 still drops the lock within 50 ms of your
+   thrust, invisible against a 1 s telegraph.
 4. Cooldown `BATTERY_FIRE_COOLDOWN = 4 s` between shots.
 
 Toggle the system on/off with **Shift+F10**. Disabling drops any
@@ -759,6 +776,7 @@ tweaked by feel:
 | `BATTERY_RANGE` | 2400 | AA targeting range (~6.3× turret range) |
 | `BATTERY_FIRE_COOLDOWN` | 4.0 | Seconds between AA shots |
 | `BATTERY_LASER_DURATION` | 1.0 | Targeting-laser telegraph window before firing |
+| `BATTERY_TRACK_SOLVE_INTERVAL` | 0.05 | Re-solve cadence while locked on; raise to cut CPU, at the cost of dodge-detection latency |
 | `BATTERY_SPAWN_PROBABILITY` | 0.5 | Per-landable-body roll for AA presence |
 | `MISSILE_PRINTER_COST` | 100 | Build cost (vs `TURRET_COST = 50`) |
 | `MISSILE_PRINTER_RANGE` | 5000 | Hostile-detection range (vs `TURRET_RANGE = 380`) |

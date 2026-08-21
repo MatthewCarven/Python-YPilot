@@ -1,5 +1,63 @@
 # Worklog
 
+## 2026-08-21
+
+- **Threading + per-frame-CPU audit** (Matthew asked what background work
+  the game is actually doing). Answer: there is exactly **one** thread in
+  the whole program -- `VideoRecorder._writer`, the daemon that drains an
+  8-slot bounded queue into ffmpeg's stdin (F9 recording). It is idle
+  unless recording. Nothing else is threaded; every predictor runs on the
+  main thread. Inventory of the predictor calls, cheapest-first:
+  - `Ship.predict_trajectory` callers: battery intercept solver, plan-mode
+    commit snapshot, camera lookahead (paused only), the cyan live
+    predict, and the orange plan-mode overlay.
+  - The **cyan live predict** is the biggest single consumer (up to
+    `PREDICT_TARGET_STEPS = 6400` leapfrog steps, each 2x `gravity_at_t`
+    over every body plus a collision sweep, then three full point-list
+    walks for SOI / apsides / closest-approach) -- but it is already
+    well-behaved: the `predict_cache` dirty-check amortises it over
+    `PREDICT_CACHE_INTERVAL = 3` frames and force-refreshes on any state
+    divergence. **Left alone deliberately.**
+  - The **actual waste was `PlanetaryBattery._solve_intercept`** (below).
+- **Battery solver: added a range gate.** `_solve_intercept` runs a
+  120-step gravity-aware `predict_trajectory` and only then bails if the
+  converged intercept lies outside `BATTERY_RANGE`. Since ~50% of landable
+  bodies roll a battery, every battery in the system -- including ones on
+  the far side of the sun -- was paying for a full predict every
+  `BATTERY_SOLVE_INTERVAL` purely to throw the result away. Now gated on
+  `reach = BATTERY_RANGE + ship.vel.length() * horizon * 1.5` against a
+  squared-distance check before the predict. Conservative by construction
+  (a solve can only succeed if the ship's predicted path enters
+  `BATTERY_RANGE` of the battery's *current* position, and ship
+  displacement over the horizon is bounded by speed x horizon; the 1.5x
+  is headroom for gravitational speed-up mid-horizon), so it can only ever
+  skip solves that were already doomed to fail. **No gameplay change.**
+- **Battery solver: tracking no longer re-solves every physics tick.**
+  `PlanetaryBattery.update` is called from inside the *physics* loop, not
+  the frame loop -- so a battery in `tracking` was running that 120-step
+  predict 60x a second, each. Now gated on new
+  `BATTERY_TRACK_SOLVE_INTERVAL = 0.05` (~20 Hz), reusing the existing
+  `solve_age` accumulator (already zeroed on the idle->tracking
+  transition, so the first cadence window is correct). Aim point holds
+  between solves. Gameplay delta: the burn-to-dodge escape now drops the
+  lock within 50 ms of the player's thrust instead of within 17 ms --
+  invisible against a 1.0 s telegraph laser. 3x fewer solves while a
+  battery is locked on.
+- Both changes compile clean (`py_compile`). **Not playtested** -- no
+  display in this session. Worth a field check that the AA telegraph
+  still reads smoothly and that dodging still drops the lock (Shift+F10
+  toggles batteries).
+- **Discussed, not built: live thrust-preview ghosts** -- HUD lines
+  showing where you would end up if you held W or S for 0.1 s. Verdict
+  and proposed shape recorded in TASKS.md; the short version is that
+  plan mode already does exactly this (`PLAN_BURN_DURATION_DEFAULT` is
+  literally `0.1`), so the feature is "plan mode, live, locked to
+  prograde/retro", and it should be a *held peek* rather than always-on.
+- Note for Matthew: your working tree still has two uncommitted tweaks I
+  deliberately did **not** fold into this commit -- `Camera.__init__`
+  zoom `1.0 -> 0.25`, and a stray blank-line pair in `main()` near the
+  closest-approach target pick. Left them for you to keep or drop.
+
 ## 2026-08-17
 
 - **All three random-universe HUD readouts now report planets + moons +

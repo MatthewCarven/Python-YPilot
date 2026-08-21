@@ -596,6 +596,7 @@ BATTERY_RANGE             = 2400.0          # ~6.3x TURRET_RANGE
 BATTERY_FIRE_COOLDOWN     = 4.0             # seconds between shots
 BATTERY_LASER_DURATION    = 1.0             # telegraph window before firing
 BATTERY_SOLVE_INTERVAL    = 0.25            # idle solve cadence (seconds)
+BATTERY_TRACK_SOLVE_INTERVAL = 0.05         # tracking re-solve cadence (seconds)
 BATTERY_SOLVE_MAX_ITERS   = 6               # intercept iteration cap
 BATTERY_PREDICT_STEPS     = 120             # coarse predictor for solver
 BATTERY_BODY              = 9.0
@@ -1435,8 +1436,9 @@ class Turret:
 class PlanetaryBattery:
     """Body-mounted anti-ship defender. State machine:
         idle      -> probe for an intercept every BATTERY_SOLVE_INTERVAL
-        tracking  -> laser visible, re-solve every frame; fire when the
-                     telegraph window expires AND the latest solve is valid
+        tracking  -> laser visible, re-solve every BATTERY_TRACK_SOLVE_
+                     INTERVAL; fire when the telegraph window expires AND
+                     the latest solve is valid
         cooldown  -> hold for BATTERY_FIRE_COOLDOWN, then idle
 
     The intercept solver iterates against ship.predict_trajectory (which
@@ -1468,6 +1470,20 @@ class PlanetaryBattery:
         # plus a 1.5x safety factor for solver stability when the ship is
         # diving toward the battery.
         horizon = BATTERY_RANGE / max(BULLET_SPEED, 1e-3) * 1.5
+        # Cheap range gate in front of the expensive part. A solve can only
+        # succeed if some point of the ship's predicted path lands within
+        # BATTERY_RANGE of where this battery sits *now* (that's the bail
+        # condition at the bottom of the iteration). The ship can displace
+        # at most ~speed * horizon over the window we predict, so anything
+        # beyond BATTERY_RANGE + that bound is guaranteed to fail -- skip
+        # the 120-step gravity-aware predict entirely. The 1.5x factor is
+        # headroom for the ship gaining speed under gravity mid-horizon.
+        # Without this gate every battery in the system (~50% of landable
+        # bodies roll one) burned a full predict every solve just to throw
+        # the result away, whether or not the ship was anywhere near it.
+        reach = BATTERY_RANGE + ship.vel.length() * horizon * 1.5
+        if (ship.pos - self.pos).length_squared() > reach * reach:
+            return None, 0.0
         pts, _, dt_used = ship.predict_trajectory(
             bodies, sim_time, seconds=horizon,
             pos0=ship.pos, vel0=ship.vel,
@@ -1515,16 +1531,24 @@ class PlanetaryBattery:
                     self.state_timer = BATTERY_LASER_DURATION
             return
 
-        # tracking
-        aim, lead = self._solve_intercept(ship, bodies, sim_time)
-        if aim is None:
-            # Ship burning / out of range -- give up the lock, laser drops.
-            self.state = "idle"
-            self.aim_point = None
+        # tracking. Re-solve on a cadence, not every physics tick. The
+        # telegraph laser is visible for BATTERY_LASER_DURATION (1.0s), so
+        # a 20 Hz aim refresh looks identical to a 60 Hz one, and the burn-
+        # to-dodge escape still drops the lock within BATTERY_TRACK_SOLVE_
+        # INTERVAL of the player's thrust. Solving every tick meant a full
+        # 120-step gravity-aware predict 60x a second per tracking battery.
+        self.solve_age += dt
+        if self.solve_age >= BATTERY_TRACK_SOLVE_INTERVAL:
             self.solve_age = 0.0
-            return
-        self.aim_point = aim
-        self.aim_lead = lead
+            aim, lead = self._solve_intercept(ship, bodies, sim_time)
+            if aim is None:
+                # Ship burning / out of range -- give up the lock, laser drops.
+                self.state = "idle"
+                self.aim_point = None
+                self.solve_age = 0.0
+                return
+            self.aim_point = aim
+            self.aim_lead = lead
         self.state_timer -= dt
         if self.state_timer <= 0.0:
             self._fire(bullets)
