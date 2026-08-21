@@ -56,7 +56,11 @@ In flight: the **gameplay-elements arc** (planned with Matthew
   took on-screen segments 18 -> 300, the zero-thrust false-deviation
   floor 265.7 u -> 0.0, and made the tap read as a small deviation
   instead of an orbit change -- for no extra CPU. Tap stays 0.1 s.
-  Remaining feel questions for playtest #3: (a) is Tab the right key, or
+  **Defaults provisionally accepted by Matthew 2026-08-21** ("seems to
+  work well ... the defaults look good") on a first look, with fuller
+  playtesting still to come -- so treat the tuning below as settled
+  unless a real field run says otherwise, and don't re-litigate it.
+  Remaining feel questions for that fuller run: (a) is Tab the right key, or
   does it want to be something the left hand can hold while WASD-ing?
   (b) is the ~9 deg ghost lag while sweeping the nose noticeable enough
   to annoy -- if so, drop `PREDICT_CACHE_INTERVAL` or add `ship.angle`
